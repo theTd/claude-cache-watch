@@ -42,9 +42,10 @@ try {
     $releaseReadme = (Get-Content -Raw -Encoding UTF8 (Join-Path $releaseProjectDir "docs/portable-readme.md")).Replace("{{VERSION}}", $releaseVersion)
     [IO.File]::WriteAllText((Join-Path $releaseStage "README.md"), $releaseReadme, [Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $releaseProjectDir "CHANGELOG.md") -Destination $releaseStage
+    Copy-Item -LiteralPath (Join-Path $releaseProjectDir "LICENSE") -Destination $releaseStage
     $releaseStem = "claude-cache-watch-$releaseVersion-windows-x64-portable"
     $releaseZip = Join-Path $releaseOutput "$releaseStem.zip"
-    Compress-Archive -LiteralPath @((Join-Path $releaseStage "Claude Cache Watch.exe"), (Join-Path $releaseStage "README.md"), (Join-Path $releaseStage "CHANGELOG.md")) -DestinationPath $releaseZip -Force
+    Compress-Archive -LiteralPath @((Join-Path $releaseStage "Claude Cache Watch.exe"), (Join-Path $releaseStage "README.md"), (Join-Path $releaseStage "CHANGELOG.md"), (Join-Path $releaseStage "LICENSE")) -DestinationPath $releaseZip -Force
     $releaseHasher = [Security.Cryptography.SHA256]::Create()
     $releaseStream = [IO.File]::OpenRead($releaseZip)
     try { $releaseHash = [BitConverter]::ToString($releaseHasher.ComputeHash($releaseStream)).Replace("-", "").ToLowerInvariant() }
@@ -63,8 +64,8 @@ try {
     Write-Output "Public release package ready: $releaseZip"
 } finally {
     if ($releaseStage -and (Test-Path -LiteralPath $releaseStage)) {
-        # Remove only the three files created here, then the empty staging directory.
-        foreach ($releaseFilename in @("Claude Cache Watch.exe", "README.md", "CHANGELOG.md")) {
+        # Remove only the four files created here, then the empty staging directory.
+        foreach ($releaseFilename in @("Claude Cache Watch.exe", "README.md", "CHANGELOG.md", "LICENSE")) {
             Remove-Item -LiteralPath (Join-Path $releaseStage $releaseFilename) -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $releaseStage -ErrorAction SilentlyContinue

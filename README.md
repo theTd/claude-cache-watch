@@ -82,4 +82,8 @@ Review the changed version files and add release notes to `CHANGELOG.md`. After 
 
 Version commands never commit, tag or push automatically. See [development and releases](docs/releasing.md) for CI setup, release retries and the public-data audit.
 
+## License
+
+Licensed under the [MIT License](LICENSE). Copyright (c) 2026 theTd.
+
 [Changelog](CHANGELOG.md) · [Usage guide](docs/usage.md) · [Build and release guide](docs/releasing.md)

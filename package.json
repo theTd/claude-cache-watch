@@ -1,6 +1,8 @@
 {
   "name": "claude-cache-watch",
   "version": "0.1.0",
+  "description": "Portable Windows tray monitor for Claude Code usage, cache misses, API cost estimates, and live trends.",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "tauri dev",

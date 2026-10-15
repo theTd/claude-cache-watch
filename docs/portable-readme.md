@@ -11,3 +11,5 @@ The dashboard shows searchable call history, session/subagent titles, API cost e
 History and settings are stored in `%LOCALAPPDATA%\local.claude-cache-watch`. The app does not upload data or store full prompts/replies. Project paths, titles and usage totals can still be private: review screenshots and exports before sharing.
 
 Use the source repository's README and documentation for development, pricing details, and release updates. The adjacent changelog describes this version. The separately published `.sha256` file verifies the downloaded ZIP.
+
+Licensed under the MIT License. Copyright (c) 2026 theTd. See the included LICENSE file for terms.

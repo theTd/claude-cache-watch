@@ -2,7 +2,8 @@
 name = "claude-cache-watch"
 version = "0.1.0"
 edition = "2021"
-description = "Local Claude Code cache miss monitor"
+description = "Portable Windows tray monitor for Claude Code usage, cache misses, API cost estimates, and live trends."
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

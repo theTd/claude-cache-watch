@@ -24,7 +24,7 @@ export function prepareRelease(root = projectRoot, tag) {
   if (scanArtifact(archivePath).length) throw new Error("Portable archive failed the public-data audit");
   const members = unzipSync(archive);
   const files = Object.keys(members).filter((name) => !name.endsWith("/")).sort();
-  if (JSON.stringify(files) !== JSON.stringify(["CHANGELOG.md", "Claude Cache Watch.exe", "README.md"])) throw new Error("Portable archive contains unexpected files");
+  if (JSON.stringify(files) !== JSON.stringify(["CHANGELOG.md", "Claude Cache Watch.exe", "LICENSE", "README.md"])) throw new Error("Portable archive contains unexpected files");
   const exe = Buffer.from(members["Claude Cache Watch.exe"]);
   const pe = exe.length >= 64 ? exe.readUInt32LE(60) : -1;
   if (exe.toString("ascii", 0, 2) !== "MZ" || pe < 64 || pe + 6 > exe.length

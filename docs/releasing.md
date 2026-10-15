@@ -13,7 +13,7 @@ npm run check
 npm run build
 ```
 
-`npm run build` validates versions, remaps local compiler paths, builds the Windows x64 EXE, scans the binary, and creates a ZIP, SHA-256 checksum file and release manifest in `dist/releases/`. Only the EXE, README and changelog are included in the ZIP. It does not read your usage database, package screenshots, install the app, commit files, or create Git tags.
+`npm run build` validates versions, remaps local compiler paths, builds the Windows x64 EXE, scans the binary, and creates a ZIP, SHA-256 checksum file and release manifest in `dist/releases/`. Only the EXE, README, changelog and MIT license are included in the ZIP. It does not read your usage database, package screenshots, install the app, commit files, or create Git tags.
 
 The raw executable is `src-tauri/target/x86_64-pc-windows-msvc/release/claude-cache-watch.exe`. Publish the verified ZIP and checksum from `dist/releases/`; older ad hoc EXEs and ZIPs elsewhere in `dist/` may contain local compiler paths. If additional compiler flags are needed, supply them through `CARGO_ENCODED_RUSTFLAGS`; the script preserves that variable and restores it after building.
 

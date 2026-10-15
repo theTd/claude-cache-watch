@@ -13,7 +13,7 @@ const manifests = ["package.json", "package-lock.json", "src-tauri/Cargo.toml", 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cache-watch-release-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  for (const name of [...manifests, "CHANGELOG.md"]) {
+  for (const name of [...manifests, "CHANGELOG.md", "LICENSE"]) {
     fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); fs.copyFileSync(path.join(projectRoot, name), path.join(root, name));
   }
   return root;
@@ -21,7 +21,7 @@ function fixture(t) {
 function packageFixture(root, extra = {}) {
   const version = checkVersions(root), output = path.join(root, "dist/releases"); fs.mkdirSync(output, { recursive: true });
   const exe = Buffer.alloc(128); exe.write("MZ"); exe.writeUInt32LE(64, 60); exe.write("PE\0\0", 64, "binary"); exe.writeUInt16LE(0x8664, 68);
-  const zip = zipSync({ "Claude Cache Watch.exe": exe, "README.md": Buffer.from("Public example"), "CHANGELOG.md": Buffer.from("Release notes"), ...extra });
+  const zip = zipSync({ "Claude Cache Watch.exe": exe, "README.md": Buffer.from("Public example"), "CHANGELOG.md": Buffer.from("Release notes"), "LICENSE": fs.readFileSync(path.join(root, "LICENSE")), ...extra });
   const stem = `claude-cache-watch-${version}-windows-x64-portable`, sha256 = crypto.createHash("sha256").update(zip).digest("hex");
   fs.writeFileSync(path.join(output, `${stem}.zip`), zip);
   fs.writeFileSync(path.join(output, `${stem}.sha256`), `${sha256}  ${stem}.zip\n`);
@@ -29,11 +29,16 @@ function packageFixture(root, extra = {}) {
   return output;
 }
 
-test("SemVer bumps synchronize every manifest and preserve dependency versions", (t) => {
-  const root = fixture(t), old = checkVersions(root), oldLock = fs.readFileSync(path.join(root, "src-tauri/Cargo.lock"), "utf8");
+for (const [format, newline] of [["LF", "\n"], ["CRLF", "\r\n"]]) test(`SemVer bumps synchronize every manifest and preserve dependency versions (${format})`, (t) => {
+  const root = fixture(t);
+  for (const name of ["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"]) {
+    const file = path.join(root, name);
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\r?\n/g, newline));
+  }
+  const old = checkVersions(root), oldLock = fs.readFileSync(path.join(root, "src-tauri/Cargo.lock"), "utf8");
   const bumped = bumpVersion(root, "minor"); assert.notEqual(bumped, old); assert.equal(checkVersions(root), bumped);
   const newLock = fs.readFileSync(path.join(root, "src-tauri/Cargo.lock"), "utf8");
-  assert.equal(newLock.replace(`name = "claude-cache-watch"\nversion = "${bumped}"`, `name = "claude-cache-watch"\nversion = "${old}"`), oldLock);
+  assert.equal(newLock.replace(`name = "claude-cache-watch"${newline}version = "${bumped}"`, `name = "claude-cache-watch"${newline}version = "${old}"`), oldLock);
   assert.equal(bumpVersion(root, "1.0.0-beta.1"), "1.0.0-beta.1");
   assert.equal(checkVersions(root), "1.0.0-beta.1");
 });
