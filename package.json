@@ -4,9 +4,20 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build --no-bundle",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs",
-    "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs tests/release-tools.test.mjs",
+    "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "version:check": "node scripts/version.mjs check",
+    "version:bump": "node scripts/version.mjs bump",
+    "release:notes": "node scripts/version.mjs notes",
+    "audit:public": "node scripts/audit-public.mjs"
   },
-  "devDependencies": { "@tauri-apps/cli": "^2.11.3" }
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.3",
+    "fflate": "^0.8.3",
+    "semver": "^7.8.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
