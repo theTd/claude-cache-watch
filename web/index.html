@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Cache Watch</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+  <script src="interval.js" defer></script>
+  <script src="statistics.js" defer></script>
+</head>
+<body>
+  <header>
+    <div><div class="eyebrow">LOCAL / PRIVATE / ALWAYS WATCHING</div><h1>Claude Cache Watch<span class="mark">.</span></h1>
+    <p>Catch expensive cache misses. Keep the full picture.</p></div>
+    <div id="status" role="status">Starting monitor…</div>
+  </header>
+  <main>
+    <div id="error" class="error" role="alert" hidden></div>
+    <section class="panel interval" aria-label="Statistics interval">
+      <div class="section-heading"><h2>Statistics interval</h2><span id="interval-mode">Live · follows now</span></div>
+      <div class="interval-presets"><button data-hours="1">Last hour</button><button data-hours="24">24 hours</button><button data-hours="168">7 days</button><button data-hours="all">All history</button></div>
+      <div class="interval-axis"><span>NOW · LIVE</span><span>OLDER</span></div>
+      <div class="range-track">
+        <input id="interval-recent" type="range" min="0" max="1000" step="1" value="0" aria-label="Recent end of statistics interval; zero means live">
+        <input id="interval-older" type="range" min="0" max="1000" step="1" value="1000" aria-label="Older end of statistics interval">
+      </div>
+      <div class="interval-dates"><span id="interval-recent-label">Now</span><span id="interval-older-label">All history</span></div>
+      <p class="note">Left is recent, right is older. Keep the recent handle at the far left for live updates; move it right to freeze a historical interval. The scale gives more room to recent periods. Cards and model totals use this interval; call history below has its own search.</p>
+      <p id="statistics-state" role="status" class="note">Loading statistics…</p>
+    </section>
+    <section class="stats" aria-label="Statistics for selected interval">
+      <article><div>API calls</div><strong id="stat-calls">—</strong><small id="stat-calls-note"></small></article>
+      <article><div>Estimated API cost · USD</div><strong id="stat-cost">—</strong><small id="stat-cost-note"></small></article>
+      <article><div>Total input tokens</div><strong id="stat-input">—</strong><small id="stat-input-note"></small></article>
+      <article><div>Output tokens</div><strong id="stat-output">—</strong><small id="stat-output-note"></small></article>
+      <article><div>Uncached input tokens</div><strong id="stat-uncached">—</strong><small id="stat-uncached-note"></small></article>
+      <article><div>Cache-read tokens</div><strong id="stat-read">—</strong><small id="stat-read-note"></small></article>
+      <article><div>Cache-write tokens</div><strong id="stat-write">—</strong><small id="stat-write-note"></small></article>
+      <article><div>Calls with zero cache reads</div><strong id="stat-misses">—</strong><small id="stat-misses-note"></small></article>
+      <article><div>High uncached input calls</div><strong id="stat-expensive">—</strong><small>Uses your current threshold and zero-cache filter</small></article>
+      <article><div>Desktop alerts submitted</div><strong id="stat-alerts">—</strong><small id="stat-alerts-note"></small></article>
+      <article><div>Active sessions</div><strong id="stat-sessions">—</strong><small id="stat-sessions-note"></small></article>
+      <article><div>Average priced call · USD</div><strong id="stat-average">—</strong><small id="stat-average-note"></small></article>
+    </section>
+    <section class="panel model-stats"><div class="section-heading"><h2>Model breakdown</h2><span>Selected statistics interval · sorted by estimated cost</span></div><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Calls</th><th class="num">Est. USD</th><th class="num">Uncached input</th><th class="num">Cache reads</th><th class="num">Output</th><th class="num">Unpriced calls</th></tr></thead><tbody id="model-stat-rows"></tbody></table></div></section>
+    <section class="panel settings">
+      <div class="section-heading"><h2>Watch settings</h2><span>Checks every 3 seconds · Close window to keep watching</span></div>
+      <form id="settings-form">
+        <label class="source">Claude projects folder<input id="source" required spellcheck="false" placeholder="C:\Users\you\.claude\projects"></label>
+        <label>Uncached threshold<input id="threshold" type="number" min="1" max="1000000000" step="1" value="100000" required></label>
+        <label class="check"><input id="zero-cache" type="checkbox">Only when cache reads = 0</label>
+        <label class="check"><input id="paused" type="checkbox">Pause monitoring</label>
+        <div class="actions"><button type="submit" class="primary">Save settings</button><button type="button" id="test">Test desktop alert</button><button type="button" id="data">Open data folder</button><span id="feedback" role="status"></span></div>
+      </form>
+      <p class="note">Alerts fire when ordinary input + cache-write tokens strictly exceed the threshold. Cache reads and output tokens are excluded. Existing logs are imported silently when the app starts or the folder changes. No prompts or responses are stored.</p>
+      <details id="pricing-panel">
+        <summary>API billing rates</summary>
+        <p class="note">Estimates use Anthropic USD list prices verified October 16, 2026, with cache duration, fast mode, US inference and Haiku prompt tiers when recorded. These are estimated API costs; subscription usage is not a separate API invoice.</p>
+        <form id="rates-form">
+          <label class="rate-model">Model ID<input id="rate-model" list="rate-models" required spellcheck="false" placeholder="claude-opus-5-5"><datalist id="rate-models"></datalist></label>
+          <label>Input / million<input id="rate-input" type="number" min="0" max="1000000" step="any" required></label>
+          <label>5m writes / million<input id="rate-cache_5m" type="number" min="0" max="1000000" step="any" required></label>
+          <label>1h writes / million<input id="rate-cache_1h" type="number" min="0" max="1000000" step="any" required></label>
+          <label>Reads / million<input id="rate-read" type="number" min="0" max="1000000" step="any" required></label>
+          <label>Output / million<input id="rate-output" type="number" min="0" max="1000000" step="any" required></label>
+          <div class="actions"><button class="primary" type="submit">Save custom rates</button><button id="reset-rates" type="button">Use published rates</button><span id="rate-feedback" role="status"></span></div>
+        </form>
+        <p class="note">Custom rates are final effective USD rates: include any provider, speed or region premiums yourself. They replace model tiers and modifiers for this exact model ID and recalculate existing history. Unknown models show Pricing needed until configured. Recorded web searches add $0.01 each.</p>
+      </details>
+    </section>
+    <section class="panel history">
+      <div class="section-heading"><h2>Call history</h2><div class="filters"><input id="search" type="search" placeholder="Search session, subagent, project, model…" aria-label="Search history"><label class="check"><input id="alerts-only" type="checkbox">Alerts only</label><button id="export">Export this page</button></div></div>
+      <p id="export-result" role="status" hidden></p>
+      <div class="table-wrap"><table><thead><tr><th>Session / subagent</th><th>Model</th><th class="num">Uncached</th><th class="num">Cache writes</th><th class="num">Cache reads</th><th class="num">Output</th><th class="num">Est. API USD</th><th>Alert</th></tr></thead><tbody id="rows"></tbody></table></div>
+      <p class="billing-summary" id="page-billing" role="status"></p>
+      <div class="pagination"><span id="count">Loading history…</span><div><button id="prev">Previous</button><span id="page">1</span><button id="next">Next</button></div></div>
+    </section>
+    <footer><span id="scan">Waiting for first scan…</span><span>SQLite history · On this computer only</span></footer>
+  </main>
+</body>
+</html>

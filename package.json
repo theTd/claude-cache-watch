@@ -1,0 +1,12 @@
+{
+  "name": "claude-cache-watch",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build --no-bundle",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs",
+    "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+  },
+  "devDependencies": { "@tauri-apps/cli": "^2.11.3" }
+}

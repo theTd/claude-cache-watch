@@ -1,0 +1,22 @@
+[package]
+name = "claude-cache-watch"
+version = "0.1.0"
+edition = "2021"
+description = "Local Claude Code cache miss monitor"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+walkdir = "2"
+dirs = "6"
+parking_lot = "0.12"
+winrt-notification = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
