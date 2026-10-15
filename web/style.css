@@ -28,6 +28,22 @@ main { padding: 24px 36px; }
 .range-track input[type=range]:focus-visible::-webkit-slider-thumb { outline: 2px solid #fff; outline-offset: 2px; }
 .model-stats .section-heading { margin: 0; padding: 20px; }
 .stats article:last-child strong { color: #ffc58b; }
+.trends { padding: 20px; }
+.trends .section-heading { margin-bottom: 4px; align-items: flex-start; }
+#trend-caption { margin-top: 7px; }
+#trend-metric { width: 290px; max-width: 100%; background: #0e1721; color: #dce6ef; border: 1px solid #415368; padding: 8px 10px; border-radius: 5px; }
+#trend-chart { width: 100%; height: auto; display: block; min-height: 190px; outline-offset: 3px; }
+.chart-grid { stroke: #2c3c4c; stroke-width: 1; }
+.chart-label { fill: #a9bcce; font-size: 11px; font-family: "Segoe UI", sans-serif; }
+.chart-line { stroke: #83e6bc; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart-point { fill: #83e6bc; }
+.chart-crosshair { stroke: #8fa5b9; stroke-width: 1; stroke-dasharray: 4 4; }
+.chart-focus { fill: #f2f7fb; stroke: #83e6bc; stroke-width: 2; }
+#trend-reading { min-height: 30px; color: #c6dfd4; font-size: 12px; margin: 8px 0 0; line-height: 1.6; }
+.card-trend { display: block; width: 100%; height: 42px; margin-top: 12px; padding: 4px 0; border: 0; border-radius: 0; border-top: 1px solid #334454; background: transparent; color: #789c8d; }
+.card-trend svg { display: block; width: 100%; height: 34px; }
+.card-trend:hover,.card-trend.selected { color: #83e6bc; background: transparent; }
+.card-trend:focus-visible { outline: 2px solid #83e6bc; }
 small { font-size: 11px; color: #91a4b7; }
 .panel { border: 1px solid #303d4b; border-radius: 10px; background: #151e28; margin-bottom: 20px; overflow: hidden; }
 .settings { padding: 20px; }

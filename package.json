@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build --no-bundle",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs",
     "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
   },
   "devDependencies": { "@tauri-apps/cli": "^2.11.3" }

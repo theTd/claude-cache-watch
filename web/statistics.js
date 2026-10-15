@@ -48,6 +48,7 @@
       return tr;
     }));
     byId("statistics-state").textContent = `${interval.live ? "Updated" : "Historical snapshot"} ${date(Date.now())} · ${number(stats.undated_calls)} calls without valid timestamps are excluded from interval statistics.`;
+    window.renderTrends?.(stats.trend);
   }
   async function update() {
     if (busy) { rerun = true; return; }

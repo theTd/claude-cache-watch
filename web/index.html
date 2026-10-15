@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
   <script src="interval.js" defer></script>
+  <script src="trends.js" defer></script>
   <script src="statistics.js" defer></script>
 </head>
 <body>
@@ -26,8 +27,15 @@
         <input id="interval-older" type="range" min="0" max="1000" step="1" value="1000" aria-label="Older end of statistics interval">
       </div>
       <div class="interval-dates"><span id="interval-recent-label">Now</span><span id="interval-older-label">All history</span></div>
-      <p class="note">Left is recent, right is older. Keep the recent handle at the far left for live updates; move it right to freeze a historical interval. The scale gives more room to recent periods. Cards and model totals use this interval; call history below has its own search.</p>
+      <p class="note">Left is recent, right is older. Keep the recent handle at the far left for live updates; move it right to freeze a historical interval. The scale gives more room to recent periods. Cards, charts and model totals use this interval; call history below has its own search.</p>
       <p id="statistics-state" role="status" class="note">Loading statistics…</p>
+    </section>
+    <section id="trend-panel" class="panel trends" aria-label="Metric trends">
+      <div class="section-heading"><div><h2 id="trend-title">API calls</h2><p id="trend-caption" class="note">Loading trend…</p></div><label>Metric<select id="trend-metric" aria-label="Trend metric"></select></label></div>
+      <svg id="trend-chart" viewBox="0 0 1000 280" role="img" tabindex="0" aria-label="Metric trend"></svg>
+      <p id="trend-empty" class="note" hidden>No calls in this interval.</p>
+      <p id="trend-reading" role="status">Hover the chart for details.</p>
+      <p class="note">Values are per time bucket. Session, subagent, project and model counts are distinct within each bucket. Estimated costs sum priced calls; missing prices appear as gaps when a bucket has no priced calls. Alert outcomes are grouped by the original call time.</p>
     </section>
     <section class="stats" aria-label="Statistics for selected interval">
       <article><div>API calls</div><strong id="stat-calls">—</strong><small id="stat-calls-note"></small></article>
