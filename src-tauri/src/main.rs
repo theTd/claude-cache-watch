@@ -39,6 +39,12 @@ struct Snapshot {
 }
 
 #[tauri::command]
+fn dashboard_active(window: tauri::Window) -> Result<bool, String> {
+    Ok(window.is_visible().map_err(|e| e.to_string())?
+        && !window.is_minimized().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
 async fn snapshot(
     state: State<'_, Arc<Shared>>,
     search: String,
@@ -303,6 +309,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
         .invoke_handler(tauri::generate_handler![
+            dashboard_active,
             snapshot,
             save_settings,
             test_notification,

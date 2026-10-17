@@ -5,10 +5,11 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use walkdir::WalkDir;
 
@@ -28,6 +29,7 @@ pub struct Status {
 pub struct Scanner {
     source: String,
     baseline: HashMap<PathBuf, Option<Baseline>>,
+    unchanged: HashMap<PathBuf, (FileStamp, Option<FileStamp>)>,
     initialized: bool,
 }
 
@@ -36,11 +38,48 @@ struct Baseline {
     prefix: Vec<u8>,
 }
 
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    length: u64,
+    modified: SystemTime,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+}
+
+fn file_stamps(path: &Path) -> Option<(FileStamp, Option<FileStamp>)> {
+    let stamp = FileStamp::read(path).ok()?;
+    let sidecar = if titles::identity(path).1.is_empty() {
+        None
+    } else {
+        match FileStamp::read(&path.with_extension("meta.json")) {
+            Ok(stamp) => Some(stamp),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            // Metadata is only an optimization; let the normal scan handle errors.
+            Err(_) => return None,
+        }
+    };
+    Some((stamp, sidecar))
+}
+
+struct ScanProgress {
+    importing: bool,
+    waiting_for_change: bool,
+}
+
 impl Scanner {
     pub fn new() -> Self {
         Self {
             source: String::new(),
             baseline: HashMap::new(),
+            unchanged: HashMap::new(),
             initialized: false,
         }
     }
@@ -50,6 +89,7 @@ impl Scanner {
             self.source = source.to_owned();
             self.initialized = false;
             self.baseline.clear();
+            self.unchanged.clear();
         }
         if !Path::new(source).is_dir() {
             return Err(format!("Log folder unavailable: {source}"));
@@ -62,6 +102,9 @@ impl Scanner {
                 paths.push(entry.into_path());
             }
         }
+        let present: HashSet<_> = paths.iter().collect();
+        self.unchanged.retain(|path, _| present.contains(path));
+        self.baseline.retain(|path, _| present.contains(path));
         if !self.initialized {
             for path in &paths {
                 let mut file = File::open(path).map_err(|e| e.to_string())?;
@@ -86,12 +129,28 @@ impl Scanner {
         path: &Path,
         settings: &Settings,
     ) -> Result<bool, String> {
-        scan_file(
+        // Inspect cheap metadata before opening transcripts, reading sidecars or querying SQLite.
+        // Cache only successful scans that reached EOF (or an unfinished trailing line).
+        let stamps = file_stamps(path);
+        if stamps
+            .as_ref()
+            .is_some_and(|stamps| self.unchanged.get(path) == Some(stamps))
+        {
+            return Ok(false);
+        }
+        self.unchanged.remove(path);
+        let progress = scan_file(
             conn,
             path,
             settings,
             self.baseline.entry(path.to_path_buf()).or_default(),
-        )
+        )?;
+        if progress.waiting_for_change {
+            if let Some(stamps) = stamps {
+                self.unchanged.insert(path.to_path_buf(), stamps);
+            }
+        }
+        Ok(progress.importing)
     }
 }
 
@@ -100,10 +159,10 @@ fn scan_file(
     path: &Path,
     settings: &Settings,
     baseline: &mut Option<Baseline>,
-) -> Result<bool, String> {
+) -> Result<ScanProgress, String> {
     // Title metadata is optional: report failures after processing the actual transcript.
     let metadata_error = titles::record_agent_sidecar(conn, path).err();
-    let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
+    let result = (|| -> Result<ScanProgress, Box<dyn std::error::Error>> {
         let path_text = path.to_string_lossy();
         let mut file = File::open(path)?;
         let length = file.metadata()?.len();
@@ -130,13 +189,17 @@ fn scan_file(
             offset = 0;
         }
         if offset == length && !old_signature.is_empty() && !replaced {
-            return Ok(false);
+            return Ok(ScanProgress {
+                importing: false,
+                waiting_for_change: true,
+            });
         }
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = BufReader::new(file);
         let tx = conn.transaction()?;
         let start = offset;
         let mut line = Vec::new();
+        let mut partial_line = false;
         while offset < length && offset - start < BATCH_BYTES {
             line.clear();
             // Bound memory even if a malformed transcript lacks newlines.
@@ -150,6 +213,7 @@ fn scan_file(
                 );
             }
             if read == 0 || line.last() != Some(&b'\n') {
+                partial_line = true;
                 break;
             }
             if let Ok(value) = serde_json::from_slice(&line) {
@@ -176,12 +240,15 @@ fn scan_file(
         tx.execute("INSERT INTO cursors VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,signature=excluded.signature",
             params![path_text.as_ref(), i64::try_from(offset)?, prefix])?;
         tx.commit()?;
-        Ok(offset < import_until && offset < length)
+        Ok(ScanProgress {
+            importing: offset < import_until && offset < length,
+            waiting_for_change: offset == length || partial_line,
+        })
     })();
     match result {
-        Ok(importing) => match metadata_error {
+        Ok(progress) => match metadata_error {
             Some(error) => Err(error),
-            None => Ok(importing),
+            None => Ok(progress),
         },
         Err(error) => Err(format!("{}: {error}", path.display())),
     }
@@ -193,6 +260,121 @@ mod tests {
     use std::io::Write;
     fn line(id: &str) -> String {
         format!("{{\"type\":\"assistant\",\"requestId\":\"{id}\",\"message\":{{\"usage\":{{\"input_tokens\":100001}}}}}}\n")
+    }
+
+    #[test]
+    fn unchanged_files_do_not_query_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, line("original")).unwrap();
+        let mut db = store::open(Path::new(":memory:")).unwrap();
+        let mut scanner = Scanner::new();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        // Any cursor lookup would fail: an unchanged file must not touch SQLite at all.
+        db.execute("DROP TABLE cursors", []).unwrap();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        std::fs::write(&path, line("changed-content")).unwrap();
+        assert!(scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .is_err());
+    }
+
+    #[test]
+    fn sidecars_are_refreshed_without_transcript_changes_and_errors_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1/subagents/agent-a1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, line("call")).unwrap();
+        let mut db = store::open(Path::new(":memory:")).unwrap();
+        let mut scanner = Scanner::new();
+        let settings = Settings::default();
+        scanner.scan_file(&mut db, &path, &settings).unwrap();
+        std::fs::write(path.with_extension("meta.json"), "partial JSON").unwrap();
+        for _ in 0..2 {
+            assert!(scanner.scan_file(&mut db, &path, &settings).is_err());
+        }
+        std::fs::write(
+            path.with_extension("meta.json"),
+            r#"{"description":"Recovered title"}"#,
+        )
+        .unwrap();
+        scanner.scan_file(&mut db, &path, &settings).unwrap();
+        assert_eq!(
+            store::history(&db, "Recovered title", false, 0)
+                .unwrap()
+                .total,
+            1
+        );
+        std::fs::write(
+            path.with_extension("meta.json"),
+            r#"{"description":"New agent title"}"#,
+        )
+        .unwrap();
+        scanner.scan_file(&mut db, &path, &settings).unwrap();
+        assert_eq!(
+            store::history(&db, "New agent title", false, 0)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[test]
+    fn same_length_rewrites_are_detected_by_modification_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, line("old")).unwrap();
+        let old_time = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut db = store::open(Path::new(":memory:")).unwrap();
+        let mut scanner = Scanner::new();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        std::fs::write(&path, line("new")).unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(old_time + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        assert_eq!(store::history(&db, "", false, 0).unwrap().calls, 2);
+    }
+
+    #[test]
+    fn historical_batches_continue_even_when_file_metadata_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let padding = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(BATCH_BYTES as usize));
+        std::fs::write(
+            &path,
+            format!("{}{}{}", line("first"), padding, line("last")),
+        )
+        .unwrap();
+        let settings = Settings {
+            source: dir.path().to_string_lossy().into_owned(),
+            ..Settings::default()
+        };
+        let mut db = store::open(Path::new(":memory:")).unwrap();
+        let mut scanner = Scanner::new();
+        scanner.discover(&settings.source).unwrap();
+        assert!(scanner.scan_file(&mut db, &path, &settings).unwrap());
+        assert!(!scanner.scan_file(&mut db, &path, &settings).unwrap());
+        let history = store::history(&db, "", false, 0).unwrap();
+        assert_eq!(history.calls, 2);
+        assert!(history
+            .rows
+            .iter()
+            .all(|row| row.imported && row.alert.is_empty()));
     }
 
     #[test]

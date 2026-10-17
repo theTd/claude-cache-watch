@@ -43,7 +43,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     } else if version != 1 {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS calls_date ON calls(julianday(timestamp));")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS calls_date ON calls(julianday(timestamp));
+        CREATE INDEX IF NOT EXISTS calls_pending ON calls(timestamp) WHERE alert='pending';",
+    )?;
     Ok(conn)
 }
 
@@ -287,6 +290,16 @@ pub fn set_model_rates(conn: &Connection, model: &str, rates: Option<Rates>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pending_alert_poll_uses_an_index_instead_of_scanning_history() {
+        let db = open(Path::new(":memory:")).unwrap();
+        let plan: String = db.query_row(
+            "EXPLAIN QUERY PLAN SELECT id,input+creation,read,model FROM calls WHERE alert='pending' ORDER BY timestamp LIMIT 10",
+            [], |row| row.get(3)
+        ).unwrap();
+        assert!(plan.contains("calls_pending"), "{plan}");
+    }
+
     #[test]
     fn dashboard_readers_stay_available_during_import_transactions() {
         let dir = tempfile::tempdir().unwrap();

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs tests/release-tools.test.mjs",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs tests/refresh-scheduler.test.cjs tests/release-tools.test.mjs",
     "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "version:check": "node scripts/version.mjs check",
     "version:bump": "node scripts/version.mjs bump",

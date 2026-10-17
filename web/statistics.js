@@ -51,6 +51,7 @@
     window.renderTrends?.(stats.trend);
   }
   async function update() {
+    if (!window.dashboardRefresh.active) return;
     if (busy) { rerun = true; return; }
     busy = true;
     const currentVersion = version;
@@ -76,6 +77,7 @@
     syncSliders(); schedule();
   });
   window.refreshStatistics = () => schedule();
-  update();
-  setInterval(() => { if (interval.live) schedule(false); }, 3000);
+  window.dashboardRefresh.subscribe((resumed) => {
+    if (resumed || interval.live) schedule(false);
+  });
 })();

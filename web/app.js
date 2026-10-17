@@ -72,7 +72,7 @@ function renderRow(row, expandedBilling) {
 }
 
 async function refresh() {
-  if (busy) return;
+  if (busy || !window.dashboardRefresh.active) return;
   busy = true;
   const version = queryVersion;
   try {
@@ -172,5 +172,4 @@ $("export").addEventListener("click", async () => {
   } catch (error) { showError(error); }
   finally { $("export").disabled = false; }
 });
-refresh();
-setInterval(refresh, 3000);
+window.dashboardRefresh.subscribe(refresh);

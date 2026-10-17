@@ -59,15 +59,20 @@ function harness() {
     return elements.get(id);
   };
   const context = vm.createContext({
-    window: { __TAURI__: { core: { invoke: (command, args) => new Promise((resolve, reject) => requests.push({ command, args, resolve, reject })) } } },
+    window: {
+      dashboardRefresh: { active: true, subscribe(fn) { polls.push(() => fn(false)); fn(true); } },
+      __TAURI__: { core: { invoke: (command, args) => new Promise((resolve, reject) => requests.push({ command, args, resolve, reject })) } },
+    },
     document: { getElementById: element, querySelectorAll: () => [], createElement: () => ({ append() {} }) },
     Intl, Date, setInterval: (fn) => polls.push(fn),
     setTimeout: (fn) => { const id = ++timerId; timeouts.set(id, fn); return id; },
     clearTimeout: (id) => timeouts.delete(id),
   });
   for (const file of ["interval.js", "statistics.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../web", file), "utf8"), context);
+  const pending = [...timeouts.values()]; timeouts.clear(); for (const fn of pending) fn();
   return {
     element, requests,
+    visibility(active) { context.window.dashboardRefresh.active = active; },
     poll() { polls[0](); },
     timers() { const pending = [...timeouts.values()]; timeouts.clear(); for (const fn of pending) fn(); },
     select(position) { const slider = element("interval-recent"); slider.value = position; slider.handlers.input({ target: slider }); },
@@ -81,6 +86,17 @@ function stats(calls) {
     sessions: 0, subagents: 0, projects: 0, models: [], earliest_ms: Date.now() - 86400000, undated_calls: 0 };
 }
 const settle = () => new Promise(setImmediate);
+
+test("hidden statistics do not poll or queue another calculation after an in-flight request", async () => {
+  const h = harness();
+  h.poll(); h.timers();
+  h.visibility(false);
+  h.requests[0].resolve(stats(7)); await settle();
+  for (let i = 0; i < 3; i++) { h.poll(); h.timers(); }
+  assert.equal(h.requests.length, 1);
+  h.visibility(true); h.poll(); h.timers();
+  assert.equal(h.requests.length, 2);
+});
 
 test("polls during a slow calculation coalesce without discarding its success", async () => {
   const h = harness();
