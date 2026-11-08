@@ -118,7 +118,7 @@ pub struct Tokens {
     pub output: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Estimate {
     pub total_usd: f64,
     pub input_usd: f64,

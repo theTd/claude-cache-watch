@@ -30,6 +30,7 @@ pub struct Scanner {
     source: String,
     baseline: HashMap<PathBuf, Option<Baseline>>,
     unchanged: HashMap<PathBuf, (FileStamp, Option<FileStamp>)>,
+    discovered: HashMap<PathBuf, (FileStamp, Option<FileStamp>)>,
     initialized: bool,
 }
 
@@ -38,19 +39,23 @@ struct Baseline {
     prefix: Vec<u8>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     length: u64,
     modified: SystemTime,
 }
 
 impl FileStamp {
-    fn read(path: &Path) -> std::io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
+    fn from_metadata(metadata: &std::fs::Metadata) -> std::io::Result<Self> {
         Ok(Self {
             length: metadata.len(),
             modified: metadata.modified()?,
         })
+    }
+
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        Self::from_metadata(&metadata)
     }
 }
 
@@ -80,6 +85,7 @@ impl Scanner {
             source: String::new(),
             baseline: HashMap::new(),
             unchanged: HashMap::new(),
+            discovered: HashMap::new(),
             initialized: false,
         }
     }
@@ -91,24 +97,60 @@ impl Scanner {
             self.baseline.clear();
             self.unchanged.clear();
         }
+        self.discovered.clear();
         if !Path::new(source).is_dir() {
             return Err(format!("Log folder unavailable: {source}"));
         }
-        let mut paths = Vec::new();
+        let mut jsonl_entries: Vec<(PathBuf, Option<FileStamp>)> = Vec::new();
+        let mut sidecar_stamps: HashMap<PathBuf, Option<FileStamp>> = HashMap::new();
         for entry in WalkDir::new(source).follow_links(false) {
             let entry = entry.map_err(|e| format!("Cannot discover logs: {e}"))?;
-            if entry.file_type().is_file() && entry.path().extension().is_some_and(|v| v == "jsonl")
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let stamp = entry
+                .metadata()
+                .ok()
+                .and_then(|m| FileStamp::from_metadata(&m).ok());
+            let path = entry.into_path();
+            if path.extension().is_some_and(|v| v == "jsonl") {
+                jsonl_entries.push((path, stamp));
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".meta.json"))
             {
-                paths.push(entry.into_path());
+                sidecar_stamps.insert(path, stamp);
             }
         }
+        for (path, stamp) in &jsonl_entries {
+            let Some(stamp) = *stamp else {
+                continue;
+            };
+            let sidecar = if titles::identity(path).1.is_empty() {
+                None
+            } else {
+                match sidecar_stamps.get(&path.with_extension("meta.json")) {
+                    Some(Some(sidecar)) => Some(*sidecar),
+                    None => None,
+                    Some(None) => continue,
+                }
+            };
+            self.discovered.insert(path.clone(), (stamp, sidecar));
+        }
+        // Favor active sessions while progressively importing older logs.
+        jsonl_entries.sort_by_key(|(_, stamp)| std::cmp::Reverse(stamp.map(|s| s.modified)));
+        let paths: Vec<PathBuf> = jsonl_entries.into_iter().map(|(path, _)| path).collect();
         let present: HashSet<_> = paths.iter().collect();
         self.unchanged.retain(|path, _| present.contains(path));
         self.baseline.retain(|path, _| present.contains(path));
         if !self.initialized {
             for path in &paths {
                 let mut file = File::open(path).map_err(|e| e.to_string())?;
-                let length = file.metadata().map_err(|e| e.to_string())?.len();
+                let length = match self.discovered.get(path) {
+                    Some((s, _)) => s.length,
+                    None => file.metadata().map_err(|e| e.to_string())?.len(),
+                };
                 let mut prefix = vec![0; length.min(256) as usize];
                 file.read_exact(&mut prefix).map_err(|e| e.to_string())?;
                 self.baseline
@@ -116,11 +158,17 @@ impl Scanner {
             }
             self.initialized = true;
         }
-        // Favor active sessions while progressively importing older logs.
-        paths.sort_by_cached_key(|p| {
-            std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        });
         Ok(paths)
+    }
+
+    pub fn is_unchanged(&mut self, path: &Path) -> bool {
+        if let Some(stamps) = self.discovered.get(path) {
+            if self.unchanged.get(path) == Some(stamps) {
+                self.discovered.remove(path);
+                return true;
+            }
+        }
+        false
     }
 
     pub fn scan_file(
@@ -131,7 +179,7 @@ impl Scanner {
     ) -> Result<bool, String> {
         // Inspect cheap metadata before opening transcripts, reading sidecars or querying SQLite.
         // Cache only successful scans that reached EOF (or an unfinished trailing line).
-        let stamps = file_stamps(path);
+        let stamps = self.discovered.remove(path).or_else(|| file_stamps(path));
         if stamps
             .as_ref()
             .is_some_and(|stamps| self.unchanged.get(path) == Some(stamps))
@@ -269,18 +317,24 @@ mod tests {
         std::fs::write(&path, line("original")).unwrap();
         let mut db = store::open(Path::new(":memory:")).unwrap();
         let mut scanner = Scanner::new();
-        scanner
-            .scan_file(&mut db, &path, &Settings::default())
-            .unwrap();
+        let settings = Settings {
+            source: dir.path().to_string_lossy().into_owned(),
+            ..Settings::default()
+        };
+        let discovered = scanner.discover(&settings.source).unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert!(!scanner.is_unchanged(&path));
+        scanner.scan_file(&mut db, &path, &settings).unwrap();
         // Any cursor lookup would fail: an unchanged file must not touch SQLite at all.
         db.execute("DROP TABLE cursors", []).unwrap();
-        scanner
-            .scan_file(&mut db, &path, &Settings::default())
-            .unwrap();
+        let discovered = scanner.discover(&settings.source).unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert!(scanner.is_unchanged(&path));
+        scanner.scan_file(&mut db, &path, &settings).unwrap();
         std::fs::write(&path, line("changed-content")).unwrap();
-        assert!(scanner
-            .scan_file(&mut db, &path, &Settings::default())
-            .is_err());
+        let _ = scanner.discover(&settings.source).unwrap();
+        assert!(!scanner.is_unchanged(&path));
+        assert!(scanner.scan_file(&mut db, &path, &settings).is_err());
     }
 
     #[test]

@@ -45,7 +45,9 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS calls_date ON calls(julianday(timestamp));
-        CREATE INDEX IF NOT EXISTS calls_pending ON calls(timestamp) WHERE alert='pending';",
+        CREATE INDEX IF NOT EXISTS calls_pending ON calls(timestamp) WHERE alert='pending';
+        CREATE INDEX IF NOT EXISTS calls_time_id ON calls(timestamp DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS calls_alert_time_id ON calls(timestamp DESC, id ASC) WHERE alert!='';",
     )?;
     Ok(conn)
 }
@@ -112,7 +114,7 @@ pub fn record(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Call {
     pub id: String,
     pub timestamp: String,
@@ -132,7 +134,7 @@ pub struct Call {
     pub estimated_billing: Option<Estimate>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct History {
     pub rows: Vec<Call>,
     pub total: i64,
@@ -147,69 +149,88 @@ pub fn history(
     alerts_only: bool,
     page: u32,
 ) -> rusqlite::Result<History> {
-    let filter = format!(
-        "%{}%",
-        search
-            .replace('!', "!!")
-            .replace('%', "!%")
-            .replace('_', "!_")
-    );
-    let joins=" FROM calls c LEFT JOIN sessions s ON c.session=s.id LEFT JOIN agents a ON c.session=a.session AND c.agent_id=a.id";
-    let session_title="COALESCE(NULLIF(s.custom_title,''),NULLIF(s.ai_title,''),NULLIF(s.summary,''),NULLIF(s.slug,''),NULLIF(c.session,''),'Untitled session')";
-    let predicate = " WHERE (?1=0 OR c.alert!='') AND
-        (c.project LIKE ?2 ESCAPE '!' OR c.model LIKE ?2 ESCAPE '!' OR c.session LIKE ?2 ESCAPE '!' OR c.id LIKE ?2 ESCAPE '!'
-        OR s.custom_title LIKE ?2 ESCAPE '!' OR s.ai_title LIKE ?2 ESCAPE '!' OR s.summary LIKE ?2 ESCAPE '!' OR s.slug LIKE ?2 ESCAPE '!'
-        OR a.title LIKE ?2 ESCAPE '!' OR c.agent_id LIKE ?2 ESCAPE '!')";
-    let total = conn.query_row(
-        &format!("SELECT COUNT(*){joins}{predicate}"),
-        params![alerts_only, filter],
-        |r| r.get(0),
-    )?;
-    let rates = load_rates(conn)?;
-    let mut statement = conn.prepare(&format!("SELECT c.id,c.timestamp,c.session,c.project,c.model,c.input,c.creation,c.read,c.output,c.alert,c.alert_error,c.imported,
-        c.agent_id,c.cache_1h,c.speed,c.geo,c.searches,{session_title},a.title
-        {joins}{predicate} ORDER BY c.timestamp DESC,c.id LIMIT 100 OFFSET ?3"))?;
-    let rows = statement
-        .query_map(params![alerts_only, filter, i64::from(page) * 100], |r| {
-            let model: String = r.get(4)?;
-            let tokens = Tokens {
-                input: r.get(5)?,
-                creation: r.get(6)?,
-                read: r.get(7)?,
-                output: r.get(8)?,
-            };
-            let metadata = Metadata {
-                cache_1h: r.get(13)?,
-                speed: r.get(14)?,
-                geo: r.get(15)?,
-                searches: r.get(16)?,
-            };
-            let estimated_billing = pricing::estimate(&model, tokens, &metadata, &rates);
-            Ok(Call {
-                id: r.get(0)?,
-                timestamp: r.get(1)?,
-                session: r.get(2)?,
-                project: r.get(3)?,
-                model: r.get(4)?,
-                input: r.get(5)?,
-                creation: r.get(6)?,
-                read: r.get(7)?,
-                output: r.get(8)?,
-                alert: r.get(9)?,
-                alert_error: r.get(10)?,
-                imported: r.get(11)?,
-                agent_id: r.get(12)?,
-                session_title: r.get(17)?,
-                subagent_title: r.get(18)?,
-                estimated_billing,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     let (calls, alerts, uncached) = conn.query_row(
         "SELECT COUNT(*),COALESCE(SUM(alert!=''),0),COALESCE(SUM(input+creation),0) FROM calls",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let joins = " FROM calls c LEFT JOIN sessions s ON c.session=s.id LEFT JOIN agents a ON c.session=a.session AND c.agent_id=a.id";
+    let session_title = "COALESCE(NULLIF(s.custom_title,''),NULLIF(s.ai_title,''),NULLIF(s.summary,''),NULLIF(s.slug,''),NULLIF(c.session,''),'Untitled session')";
+    let rates = load_rates(conn)?;
+    let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Call> {
+        let model: String = r.get(4)?;
+        let tokens = Tokens {
+            input: r.get(5)?,
+            creation: r.get(6)?,
+            read: r.get(7)?,
+            output: r.get(8)?,
+        };
+        let metadata = Metadata {
+            cache_1h: r.get(13)?,
+            speed: r.get(14)?,
+            geo: r.get(15)?,
+            searches: r.get(16)?,
+        };
+        let estimated_billing = pricing::estimate(&model, tokens, &metadata, &rates);
+        Ok(Call {
+            id: r.get(0)?,
+            timestamp: r.get(1)?,
+            session: r.get(2)?,
+            project: r.get(3)?,
+            model,
+            input: r.get(5)?,
+            creation: r.get(6)?,
+            read: r.get(7)?,
+            output: r.get(8)?,
+            alert: r.get(9)?,
+            alert_error: r.get(10)?,
+            imported: r.get(11)?,
+            agent_id: r.get(12)?,
+            session_title: r.get(17)?,
+            subagent_title: r.get(18)?,
+            estimated_billing,
+        })
+    };
+    let select_cols = format!(
+        "SELECT c.id,c.timestamp,c.session,c.project,c.model,c.input,c.creation,c.read,c.output,c.alert,c.alert_error,c.imported,
+        c.agent_id,c.cache_1h,c.speed,c.geo,c.searches,{session_title},a.title{joins}"
+    );
+    let offset = i64::from(page) * 100;
+    let (total, rows) = if search.is_empty() {
+        let total = if alerts_only { alerts } else { calls };
+        let where_clause = if alerts_only { " WHERE c.alert!=''" } else { "" };
+        let mut statement = conn.prepare(&format!(
+            "{select_cols}{where_clause} ORDER BY c.timestamp DESC,c.id ASC LIMIT 100 OFFSET ?1"
+        ))?;
+        let rows = statement
+            .query_map(params![offset], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        (total, rows)
+    } else {
+        let filter = format!(
+            "%{}%",
+            search
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_")
+        );
+        let predicate = " WHERE (?1=0 OR c.alert!='') AND
+            (c.project LIKE ?2 ESCAPE '!' OR c.model LIKE ?2 ESCAPE '!' OR c.session LIKE ?2 ESCAPE '!' OR c.id LIKE ?2 ESCAPE '!'
+            OR s.custom_title LIKE ?2 ESCAPE '!' OR s.ai_title LIKE ?2 ESCAPE '!' OR s.summary LIKE ?2 ESCAPE '!' OR s.slug LIKE ?2 ESCAPE '!'
+            OR a.title LIKE ?2 ESCAPE '!' OR c.agent_id LIKE ?2 ESCAPE '!')";
+        let total = conn.query_row(
+            &format!("SELECT COUNT(*){joins}{predicate}"),
+            params![alerts_only, filter],
+            |r| r.get(0),
+        )?;
+        let mut statement = conn.prepare(&format!(
+            "{select_cols}{predicate} ORDER BY c.timestamp DESC,c.id ASC LIMIT 100 OFFSET ?3"
+        ))?;
+        let rows = statement
+            .query_map(params![alerts_only, filter, offset], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        (total, rows)
+    };
     Ok(History {
         rows,
         total,

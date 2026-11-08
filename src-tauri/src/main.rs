@@ -13,7 +13,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -25,10 +28,36 @@ use tauri::{
 use usage::Settings;
 use winrt_notification::{Duration as ToastDuration, Toast};
 
+struct CachedSnapshot {
+    version: u64,
+    search: String,
+    alerts_only: bool,
+    page: u32,
+    settings: Settings,
+    history: store::History,
+}
+
+struct CachedStatistics {
+    version: u64,
+    start_ms: Option<i64>,
+    end_ms: i64,
+    stats: statistics::Statistics,
+}
+
 struct Shared {
     db: FairMutex<Connection>,
+    reader: FairMutex<Connection>,
     status: Mutex<Status>,
+    data_version: AtomicU64,
+    snapshot_cache: Mutex<Option<CachedSnapshot>>,
+    stats_cache: Mutex<Option<CachedStatistics>>,
     data_path: PathBuf,
+}
+
+impl Shared {
+    fn bump_version(&self) {
+        self.data_version.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 #[derive(Serialize)]
@@ -53,16 +82,45 @@ async fn snapshot(
 ) -> Result<Snapshot, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db = store::open_reader(&shared.data_path.join("history.sqlite3"))
-            .map_err(|e| e.to_string())?;
+        let version = shared.data_version.load(Ordering::Acquire);
+        if let Ok(guard) = shared.snapshot_cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.version == version
+                    && cached.search == search
+                    && cached.alerts_only == alerts_only
+                    && cached.page == page
+                {
+                    let status = shared.status.lock().map_err(|e| e.to_string())?.clone();
+                    return Ok(Snapshot {
+                        settings: cached.settings.clone(),
+                        status,
+                        history: cached.history.clone(),
+                    });
+                }
+            }
+        }
+        let db = shared.reader.lock();
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let result = Snapshot {
-            settings: store::settings(&tx)?,
-            status: shared.status.lock().map_err(|e| e.to_string())?.clone(),
-            history: store::history(&tx, &search, alerts_only, page).map_err(|e| e.to_string())?,
-        };
+        let settings = store::settings(&tx)?;
+        let history = store::history(&tx, &search, alerts_only, page).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(result)
+        drop(db);
+        if let Ok(mut guard) = shared.snapshot_cache.lock() {
+            *guard = Some(CachedSnapshot {
+                version,
+                search,
+                alerts_only,
+                page,
+                settings: settings.clone(),
+                history: history.clone(),
+            });
+        }
+        let status = shared.status.lock().map_err(|e| e.to_string())?.clone();
+        Ok(Snapshot {
+            settings,
+            status,
+            history,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -81,7 +139,11 @@ async fn save_settings(state: State<'_, Arc<Shared>>, settings: Settings) -> Res
             return Err("Choose an existing absolute Claude projects folder".into());
         }
         let db = shared.db.lock();
-        store::save_settings(&db, &settings)
+        let res = store::save_settings(&db, &settings);
+        if res.is_ok() {
+            shared.bump_version();
+        }
+        res
     })
     .await
     .map_err(|e| e.to_string())?
@@ -106,8 +168,7 @@ fn test_notification() -> Result<(), String> {
 async fn pricing_catalog(state: State<'_, Arc<Shared>>) -> Result<Vec<store::ModelRate>, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db = store::open_reader(&shared.data_path.join("history.sqlite3"))
-            .map_err(|e| e.to_string())?;
+        let db = shared.reader.lock();
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
         let result = store::pricing_catalog(&tx).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -126,7 +187,11 @@ async fn set_model_rates(
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let db = shared.db.lock();
-        store::set_model_rates(&db, &model, rates)
+        let res = store::set_model_rates(&db, &model, rates);
+        if res.is_ok() {
+            shared.bump_version();
+        }
+        res
     })
     .await
     .map_err(|e| e.to_string())?
@@ -143,13 +208,48 @@ async fn statistics(
     }
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db = store::open_reader(&shared.data_path.join("history.sqlite3"))
-            .map_err(|e| e.to_string())?;
+        let version = shared.data_version.load(Ordering::Acquire);
+        if let Ok(guard) = shared.stats_cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                let same_window = match (cached.start_ms, start_ms) {
+                    (None, None) => (end_ms - cached.end_ms).abs() < 60_000,
+                    (Some(cs), Some(s)) => {
+                        let cached_span = cached.end_ms.saturating_sub(cs);
+                        let span = end_ms.saturating_sub(s);
+                        cached_span == span && (end_ms - cached.end_ms).abs() < 15_000
+                    }
+                    _ => false,
+                };
+                if cached.version == version
+                    && same_window
+                    && cached
+                        .stats
+                        .latest_ms
+                        .is_none_or(|latest| latest <= cached.end_ms && latest <= end_ms)
+                {
+                    let mut stats = cached.stats.clone();
+                    if let Some(last) = stats.trend.points.last_mut() {
+                        last.end_ms = end_ms;
+                    }
+                    return Ok(stats);
+                }
+            }
+        }
+        let db = shared.reader.lock();
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
         let settings = store::settings(&tx)?;
         let result =
             statistics::calculate(&tx, start_ms, end_ms, &settings).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        drop(db);
+        if let Ok(mut guard) = shared.stats_cache.lock() {
+            *guard = Some(CachedStatistics {
+                version,
+                start_ms,
+                end_ms,
+                stats: result.clone(),
+            });
+        }
         Ok(result)
     })
     .await
@@ -175,8 +275,7 @@ async fn export_history_page(
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let rows = {
-            let db = store::open_reader(&shared.data_path.join("history.sqlite3"))
-                .map_err(|e| e.to_string())?;
+            let db = shared.reader.lock();
             let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
             let rows = store::history(&tx, &search, alerts_only, page)
                 .map_err(|e| e.to_string())?
@@ -226,6 +325,9 @@ fn deliver_pending(shared: &Shared) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         rows
     };
+    if rows.is_empty() {
+        return Ok(());
+    }
     for (id, uncached, read, model) in rows {
         let result = notify(
             "Claude Code - high uncached input",
@@ -244,11 +346,13 @@ fn deliver_pending(shared: &Shared) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
     }
+    shared.bump_version();
     Ok(())
 }
 
 fn run_monitor(shared: Arc<Shared>) {
     let mut scanner = Scanner::new();
+    let mut checked_pending_once = false;
     loop {
         let mut files = 0;
         let mut importing = false;
@@ -263,7 +367,12 @@ fn run_monitor(shared: Arc<Shared>) {
             let paths = scanner.discover(&settings.source)?;
             files = paths.len();
             let mut errors = Vec::new();
+            let mut scanned_any = false;
             for path in paths {
+                if scanner.is_unchanged(&path) {
+                    continue;
+                }
+                scanned_any = true;
                 let result = {
                     let mut db = shared.db.lock();
                     scanner.scan_file(&mut db, &path, &settings)
@@ -277,7 +386,13 @@ fn run_monitor(shared: Arc<Shared>) {
                     }
                 }
             }
-            deliver_pending(&shared)?;
+            if scanned_any {
+                shared.bump_version();
+            }
+            if scanned_any || !checked_pending_once {
+                deliver_pending(&shared)?;
+                checked_pending_once = true;
+            }
             if !errors.is_empty() {
                 return Err(errors.join("\n"));
             }
@@ -322,13 +437,19 @@ fn main() {
         .setup(|app| {
             let data_path = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_path)?;
-            let db = store::open(&data_path.join("history.sqlite3"))?;
+            let db_path = data_path.join("history.sqlite3");
+            let db = store::open(&db_path)?;
+            let reader = store::open_reader(&db_path)?;
             let shared = Arc::new(Shared {
                 db: FairMutex::new(db),
+                reader: FairMutex::new(reader),
                 status: Mutex::new(Status {
                     data_path: data_path.to_string_lossy().into_owned(),
                     ..Status::default()
                 }),
+                data_version: AtomicU64::new(1),
+                snapshot_cache: Mutex::new(None),
+                stats_cache: Mutex::new(None),
                 data_path,
             });
             app.manage(shared.clone());

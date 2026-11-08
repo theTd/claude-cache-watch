@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Default, Serialize)]
+#[derive(Default, Clone, Serialize)]
 pub struct ModelStatistics {
     pub model: String,
     pub calls: u64,
@@ -18,7 +18,7 @@ pub struct ModelStatistics {
     pub output_tokens: i64,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Clone, Serialize)]
 pub struct Metrics {
     pub calls: u64,
     pub priced_calls: u64,
@@ -44,7 +44,7 @@ pub struct Metrics {
     pub model_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TrendPoint {
     pub start_ms: i64,
     pub end_ms: i64,
@@ -52,13 +52,13 @@ pub struct TrendPoint {
     pub metrics: Metrics,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Trend {
     pub bucket_ms: i64,
     pub points: Vec<TrendPoint>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Statistics {
     pub earliest_ms: Option<i64>,
     pub latest_ms: Option<i64>,
@@ -120,19 +120,22 @@ impl Accumulator {
             self.agents
                 .insert((call.session.to_owned(), call.agent.to_owned()));
         }
-        if !call.session.is_empty() {
+        if !call.session.is_empty() && !self.sessions.contains(call.session) {
             self.sessions.insert(call.session.to_owned());
         }
-        if !call.project.is_empty() {
+        if !call.project.is_empty() && !self.projects.contains(call.project) {
             self.projects.insert(call.project.to_owned());
         }
-        let by_model =
+        let by_model = if let Some(by_model) = self.models.get_mut(call.model) {
+            by_model
+        } else {
             self.models
                 .entry(call.model.to_owned())
                 .or_insert_with(|| ModelStatistics {
                     model: call.model.to_owned(),
                     ..ModelStatistics::default()
-                });
+                })
+        };
         by_model.calls += 1;
         by_model.uncached_tokens = by_model.uncached_tokens.saturating_add(uncached);
         by_model.cache_read_tokens = by_model.cache_read_tokens.saturating_add(t.read);
