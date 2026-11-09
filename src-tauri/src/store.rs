@@ -37,11 +37,29 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             CREATE TABLE sessions(id TEXT PRIMARY KEY,custom_title TEXT NOT NULL DEFAULT '',ai_title TEXT NOT NULL DEFAULT '',summary TEXT NOT NULL DEFAULT '',slug TEXT NOT NULL DEFAULT '');
             CREATE TABLE agents(session TEXT NOT NULL,id TEXT NOT NULL,title TEXT NOT NULL,PRIMARY KEY(session,id));
             CREATE TABLE model_rates(model TEXT PRIMARY KEY,json TEXT NOT NULL);
-            DELETE FROM cursors;
             PRAGMA user_version=1;")?;
         tx.commit()?;
-    } else if version != 1 {
+    } else if version > 2 {
         return Err(rusqlite::Error::InvalidQuery);
+    }
+    if version < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE calls ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'claude';
+            ALTER TABLE calls ADD COLUMN raw_session TEXT NOT NULL DEFAULT '';
+            ALTER TABLE calls ADD COLUMN parent_session TEXT NOT NULL DEFAULT '';
+            ALTER TABLE calls ADD COLUMN call_kind TEXT NOT NULL DEFAULT 'response';
+            ALTER TABLE calls ADD COLUMN state TEXT NOT NULL DEFAULT 'DONE';
+            ALTER TABLE calls ADD COLUMN usage_complete INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE calls ADD COLUMN cache_known INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE calls ADD COLUMN creation_known INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE calls ADD COLUMN metadata_source TEXT NOT NULL DEFAULT 'claude_transcript';
+            UPDATE calls SET raw_session=session;
+            CREATE TABLE source_state (identity TEXT PRIMARY KEY, started_ms INTEGER NOT NULL);
+            CREATE INDEX calls_source_time ON calls(source_kind,timestamp);
+            PRAGMA user_version=2;",
+        )?;
+        tx.commit()?;
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS calls_date ON calls(julianday(timestamp));
@@ -59,9 +77,16 @@ pub fn settings(conn: &Connection) -> Result<Settings, String> {
         .map_err(|e| e.to_string())?;
     match json {
         Some(json) => {
-            serde_json::from_str(&json).map_err(|e| format!("Invalid saved settings: {e}"))
+            let mut settings: Settings =
+                serde_json::from_str(&json).map_err(|e| format!("Invalid saved settings: {e}"))?;
+            settings.normalize();
+            Ok(settings)
         }
-        None => Ok(Settings::default()),
+        None => {
+            let mut settings = Settings::default();
+            settings.normalize();
+            Ok(settings)
+        }
     }
 }
 
@@ -82,6 +107,9 @@ pub fn record(
     imported: bool,
     settings: &Settings,
 ) -> rusqlite::Result<()> {
+    if usage.source_kind != "claude" {
+        return record_snapshot(conn, usage, source, imported, settings);
+    }
     let alert = if !imported && usage.matches(settings) {
         "pending"
     } else {
@@ -98,6 +126,7 @@ pub fn record(
         params![usage.id, usage.timestamp, usage.session, usage.project, usage.model, usage.input,
             usage.creation, usage.read, usage.output, source, alert, imported,usage.billing.cache_1h,
             usage.billing.speed,usage.billing.geo,usage.billing.searches,usage.agent_id])?;
+    conn.execute("UPDATE calls SET raw_session=CASE WHEN raw_session='' THEN session ELSE raw_session END WHERE id=?1", [&usage.id])?;
     // Imported final usage can also invalidate a pending alert persisted before a crash.
     conn.execute(
         "UPDATE calls SET alert='' WHERE id=?1 AND alert='pending' AND ?2=1 AND read>0",
@@ -114,8 +143,85 @@ pub fn record(
     Ok(())
 }
 
+fn record_snapshot(
+    conn: &Connection,
+    u: &Usage,
+    source: &str,
+    imported: bool,
+    settings: &Settings,
+) -> rusqlite::Result<()> {
+    // A native record may enrich a transcript fallback; a fallback never downgrades native data.
+    let native = u.metadata_source == "antigravity_sqlite";
+    let existing: Option<(bool, String)> = conn
+        .query_row(
+            "SELECT imported,metadata_source FROM calls WHERE id=?1",
+            [&u.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if existing
+        .as_ref()
+        .is_some_and(|(_, source)| source == "antigravity_sqlite" && !native)
+    {
+        return Ok(());
+    }
+    let was_imported = existing.as_ref().map_or(imported, |(value, _)| *value);
+    // Eligibility is decided on first complete observation, never by enrichment or a rescan.
+    let previous_alert: Option<String> = conn
+        .query_row("SELECT alert FROM calls WHERE id=?1", [&u.id], |r| r.get(0))
+        .optional()?;
+    let alert = if !was_imported
+        && u.matches(settings)
+        && previous_alert.as_ref().is_none_or(|a| a == "pending")
+    {
+        "pending"
+    } else {
+        ""
+    };
+    conn.execute("INSERT INTO calls(id,timestamp,session,project,model,input,creation,read,output,source,alert,imported,agent_id,
+        source_kind,raw_session,parent_session,call_kind,state,usage_complete,cache_known,creation_known,metadata_source)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+        ON CONFLICT(id) DO UPDATE SET timestamp=excluded.timestamp,session=excluded.session,project=excluded.project,model=excluded.model,
+        input=excluded.input,creation=excluded.creation,read=excluded.read,output=excluded.output,agent_id=excluded.agent_id,
+        parent_session=excluded.parent_session,call_kind=excluded.call_kind,state=excluded.state,usage_complete=excluded.usage_complete,
+        cache_known=excluded.cache_known,creation_known=excluded.creation_known,metadata_source=excluded.metadata_source,
+        alert=CASE WHEN calls.alert IN ('sent','failed') THEN calls.alert ELSE excluded.alert END",
+        params![u.id,u.timestamp,u.session,u.project,u.model,u.input,u.creation,u.read,u.output,source,alert,was_imported,u.agent_id,
+        u.source_kind,u.raw_session,u.parent_session,u.kind,u.state,u.usage_complete,u.cache_known,u.creation_known,u.metadata_source])?;
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct Filter {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub kind: String,
+}
+impl Filter {
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.source.as_str(),
+            "" | "claude" | "antigravity_ide" | "antigravity_cli"
+        ) || !matches!(self.kind.as_str(), "" | "response" | "checkpoint" | "other")
+        {
+            return Err("Invalid source or call type filter".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct Call {
+    pub source_kind: String,
+    pub raw_session: String,
+    pub parent_session: String,
+    pub kind: String,
+    pub state: String,
+    pub usage_complete: bool,
+    pub cache_known: bool,
+    pub creation_known: bool,
+    pub metadata_source: String,
     pub id: String,
     pub timestamp: String,
     pub session: String,
@@ -143,18 +249,34 @@ pub struct History {
     pub uncached: i64,
 }
 
+#[cfg(test)]
 pub fn history(
     conn: &Connection,
     search: &str,
     alerts_only: bool,
     page: u32,
 ) -> rusqlite::Result<History> {
+    history_filtered(conn, search, alerts_only, page, &Filter::default())
+}
+
+pub fn history_filtered(
+    conn: &Connection,
+    search: &str,
+    alerts_only: bool,
+    page: u32,
+    filter: &Filter,
+) -> rusqlite::Result<History> {
+    let scope = format!(
+        "source_kind IN ({}) AND call_kind IN ({})",
+        sql_sources(filter),
+        sql_kinds(filter)
+    );
     let (calls, alerts, uncached) = conn.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(alert!=''),0),COALESCE(SUM(input+creation),0) FROM calls",
+        &format!("SELECT COUNT(*),COALESCE(SUM(alert!=''),0),COALESCE(SUM(input+creation),0) FROM calls WHERE {scope}"),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let joins = " FROM calls c LEFT JOIN sessions s ON c.session=s.id LEFT JOIN agents a ON c.session=a.session AND c.agent_id=a.id";
+    let joins = format!(" FROM (SELECT * FROM calls WHERE {scope}) c LEFT JOIN sessions s ON c.session=s.id LEFT JOIN agents a ON c.session=a.session AND c.agent_id=a.id");
     let session_title = "COALESCE(NULLIF(s.custom_title,''),NULLIF(s.ai_title,''),NULLIF(s.summary,''),NULLIF(s.slug,''),NULLIF(c.session,''),'Untitled session')";
     let rates = load_rates(conn)?;
     let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Call> {
@@ -171,8 +293,31 @@ pub fn history(
             geo: r.get(15)?,
             searches: r.get(16)?,
         };
-        let estimated_billing = pricing::estimate(&model, tokens, &metadata, &rates);
+        let source_kind: String = r.get(19)?;
+        let timestamp: String = r.get(1)?;
+        let estimated_billing = crate::reference_pricing::estimate(
+            crate::reference_pricing::Context {
+                source: &source_kind,
+                model: &model,
+                timestamp: &timestamp,
+                complete: r.get(24)?,
+                cache_known: r.get(25)?,
+                creation_known: r.get(26)?,
+            },
+            tokens,
+            &metadata,
+            &rates,
+        );
         Ok(Call {
+            source_kind,
+            raw_session: r.get(20)?,
+            parent_session: r.get(21)?,
+            kind: r.get(22)?,
+            state: r.get(23)?,
+            usage_complete: r.get(24)?,
+            cache_known: r.get(25)?,
+            creation_known: r.get(26)?,
+            metadata_source: r.get(27)?,
             id: r.get(0)?,
             timestamp: r.get(1)?,
             session: r.get(2)?,
@@ -193,12 +338,16 @@ pub fn history(
     };
     let select_cols = format!(
         "SELECT c.id,c.timestamp,c.session,c.project,c.model,c.input,c.creation,c.read,c.output,c.alert,c.alert_error,c.imported,
-        c.agent_id,c.cache_1h,c.speed,c.geo,c.searches,{session_title},a.title{joins}"
+        c.agent_id,c.cache_1h,c.speed,c.geo,c.searches,{session_title},a.title,c.source_kind,c.raw_session,c.parent_session,c.call_kind,c.state,c.usage_complete,c.cache_known,c.creation_known,c.metadata_source{joins}"
     );
     let offset = i64::from(page) * 100;
     let (total, rows) = if search.is_empty() {
         let total = if alerts_only { alerts } else { calls };
-        let where_clause = if alerts_only { " WHERE c.alert!=''" } else { "" };
+        let where_clause = if alerts_only {
+            " WHERE c.alert!=''"
+        } else {
+            ""
+        };
         let mut statement = conn.prepare(&format!(
             "{select_cols}{where_clause} ORDER BY c.timestamp DESC,c.id ASC LIMIT 100 OFFSET ?1"
         ))?;
@@ -240,6 +389,23 @@ pub fn history(
     })
 }
 
+pub(crate) fn sql_sources(filter: &Filter) -> &'static str {
+    match filter.source.as_str() {
+        "claude" => "'claude'",
+        "antigravity_ide" => "'antigravity_ide'",
+        "antigravity_cli" => "'antigravity_cli'",
+        _ => "'claude','antigravity_ide','antigravity_cli'",
+    }
+}
+pub(crate) fn sql_kinds(filter: &Filter) -> &'static str {
+    match filter.kind.as_str() {
+        "response" => "'response'",
+        "checkpoint" => "'checkpoint'",
+        "other" => "'other'",
+        _ => "'response','checkpoint','other'",
+    }
+}
+
 pub(crate) fn load_rates(conn: &Connection) -> rusqlite::Result<BTreeMap<String, Rates>> {
     let mut query = conn.prepare("SELECT model,json FROM model_rates")?;
     let result = query
@@ -267,6 +433,7 @@ pub(crate) fn load_rates(conn: &Connection) -> rusqlite::Result<BTreeMap<String,
 
 #[derive(Serialize)]
 pub struct ModelRate {
+    pub family: String,
     pub model: String,
     pub rates: Option<Rates>,
     pub custom: bool,
@@ -274,21 +441,41 @@ pub struct ModelRate {
 
 pub fn pricing_catalog(conn: &Connection) -> rusqlite::Result<Vec<ModelRate>> {
     let rates = load_rates(conn)?;
-    let mut query =
-        conn.prepare("SELECT DISTINCT model FROM calls WHERE model!='' ORDER BY model")?;
-    let mut models = query
-        .query_map([], |r| r.get::<_, String>(0))?
+    let mut q=conn.prepare("SELECT DISTINCT CASE WHEN source_kind='claude' THEN 'claude' ELSE 'antigravity' END,model FROM calls WHERE model!=''")?;
+    let mut models = q
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    models.extend(rates.keys().cloned());
+    for key in rates.keys() {
+        if let Some(model) = key.strip_prefix("antigravity::") {
+            models.insert(("antigravity".into(), model.into()));
+        } else {
+            models.insert(("claude".into(), key.clone()));
+        }
+    }
     Ok(models
         .into_iter()
-        .map(|model| ModelRate {
-            rates: rates
-                .get(&model)
-                .cloned()
-                .or_else(|| pricing::builtin(&model)),
-            custom: rates.contains_key(&model),
-            model,
+        .map(|(family, model)| {
+            let key = crate::reference_pricing::key(&family, &model);
+            let published = if family == "claude" {
+                pricing::builtin(&model)
+            } else {
+                crate::reference_pricing::builtin(
+                    &model,
+                    Tokens {
+                        input: 0,
+                        creation: 0,
+                        read: 0,
+                        output: 0,
+                    },
+                    "2026-11-09",
+                )
+            };
+            ModelRate {
+                custom: rates.contains_key(&key),
+                rates: rates.get(&key).cloned().or(published),
+                model,
+                family,
+            }
         })
         .collect())
 }
@@ -311,6 +498,89 @@ pub fn set_model_rates(conn: &Connection, model: &str, rates: Option<Rates>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v1_migration_preserves_cursors_alerts_settings_and_scoped_prices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.sqlite");
+        {
+            let db = open(&path).unwrap();
+            let usage=Usage::parse(br#"{"type":"assistant","requestId":"legacy","sessionId":"same-session","message":{"model":"test-model","usage":{"input_tokens":200001}}}"#).unwrap();
+            record(&db, &usage, "test", false, &Settings::default()).unwrap();
+            db.execute(
+                "UPDATE calls SET alert='failed',alert_error='old outcome'",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO cursors VALUES('existing.jsonl',42,X'010203')",
+                [],
+            )
+            .unwrap();
+            db.execute("INSERT INTO settings VALUES(1,?1)",[r#"{"source":"C:/example/custom","threshold":234567,"zero_cache_only":true,"paused":true}"#]).unwrap();
+            set_model_rates(
+                &db,
+                "test-model",
+                Some(Rates {
+                    input: 1.,
+                    read: 2.,
+                    output: 3.,
+                    cache_5m: 4.,
+                    cache_1h: 5.,
+                }),
+            )
+            .unwrap();
+            db.execute_batch("DROP INDEX calls_source_time;DROP TABLE source_state;")
+                .unwrap();
+            for column in [
+                "source_kind",
+                "raw_session",
+                "parent_session",
+                "call_kind",
+                "state",
+                "usage_complete",
+                "cache_known",
+                "creation_known",
+                "metadata_source",
+            ] {
+                db.execute_batch(&format!("ALTER TABLE calls DROP COLUMN {column}"))
+                    .unwrap();
+            }
+            db.execute_batch("PRAGMA user_version=1").unwrap();
+        }
+        let db = open(&path).unwrap();
+        let settings = super::settings(&db).unwrap();
+        assert!(settings.paused && settings.zero_cache_only);
+        assert_eq!(settings.threshold, 234567);
+        assert_eq!(settings.sources[0].path, "C:/example/custom");
+        assert_eq!(
+            db.query_row("SELECT offset FROM cursors", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+        let row = &history(&db, "", false, 0).unwrap().rows[0];
+        assert_eq!(row.source_kind, "claude");
+        assert_eq!(row.raw_session, "same-session");
+        assert_eq!(row.alert, "failed");
+        assert_eq!(row.alert_error, "old outcome");
+        set_model_rates(
+            &db,
+            "antigravity::test-model",
+            Some(Rates {
+                input: 10.,
+                read: 20.,
+                output: 30.,
+                cache_5m: 40.,
+                cache_1h: 50.,
+            }),
+        )
+        .unwrap();
+        let rates = load_rates(&db).unwrap();
+        assert_eq!(rates["test-model"].input, 1.);
+        assert_eq!(rates["antigravity::test-model"].input, 10.);
+        drop(db);
+        let db = open(&path).unwrap();
+        assert_eq!(history(&db, "", false, 0).unwrap().calls, 1);
+    }
     #[test]
     fn pending_alert_poll_uses_an_index_instead_of_scanning_history() {
         let db = open(Path::new(":memory:")).unwrap();
@@ -459,7 +729,7 @@ mod tests {
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM cursors", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            0
+            1
         );
         assert_eq!(super::settings(&db).unwrap().threshold, 234567);
         db.execute("INSERT INTO cursors VALUES('new.jsonl',100,X'01')", [])
@@ -470,7 +740,7 @@ mod tests {
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM cursors", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            1
+            2
         );
     }
     #[test]

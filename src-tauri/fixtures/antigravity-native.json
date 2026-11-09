@@ -1,0 +1,29 @@
+{
+  "description": "Captured local native usage, numeric counters only. Timestamp replaced; response IDs and all non-usage metadata removed. No prompts, titles or source session IDs.",
+  "steps": [
+    {
+      "idx": 252,
+      "step_type": 23,
+      "status": 3,
+      "metadata_hex": "0a0608c2d2c4d7064a1208890b108f831018c531301848e20250e32e"
+    },
+    {
+      "idx": 421,
+      "step_type": 15,
+      "status": 3,
+      "metadata_hex": "0a0608c2d2c4d7064a1408890b10861218e40228e7970b30184858508c02"
+    },
+    {
+      "idx": 423,
+      "step_type": 15,
+      "status": 3,
+      "metadata_hex": "0a0608c2d2c4d7064a1108890b109aad0b188f02301848d9015036"
+    },
+    {
+      "idx": 425,
+      "step_type": 15,
+      "status": 3,
+      "metadata_hex": "0a0608c2d2c4d7064a1508890b10c72018bd15289bad0b301848c60b50f709"
+    }
+  ]
+}

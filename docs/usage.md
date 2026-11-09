@@ -1,6 +1,6 @@
 # Detailed usage
 
-A portable Windows tray app that watches local Claude Code transcripts, alerts on expensive uncached calls, and keeps searchable SQLite history. Built with Tauri 2, Rust, and a small dependency-free web interface.
+A portable Windows tray app that watches Claude Code transcripts and Antigravity IDE/CLI databases, alerts on expensive uncached calls, and keeps searchable SQLite history. Built with Tauri 2, Rust, and a small dependency-free web interface.
 
 ## Run
 
@@ -20,7 +20,19 @@ The app checks approximately every 3 seconds, plus time spent processing logs. U
 
 Existing file content is imported **without alerts** at each app launch and whenever the source folder changes. Calls logged while the app was closed are therefore recorded silently. Once running, newly appended calls and newly discovered session/subagent files can alert. Pause stops ingestion and alerts; resuming processes accumulated entries under the current rule. A first import can take time with large logs, with bounded per-file batches so active sessions can continue to advance.
 
-The default source is `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects` when that environment variable is set. You can change it in the window. Missing or unreadable folders/files appear as monitor errors; they are retried on subsequent scans. File positions survive restarts. Truncated files or replacements with a different initial prefix are replayed and deduplicated. Replacements that preserve the first 256 bytes and are at least as long as the saved offset cannot be distinguished from appends.
+The default source is `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects` when that environment variable is set. You can change it in the window. Missing or unreadable folders/files appear as monitor errors; they are retried on subsequent scans. File positions survive restarts. Changed Claude transcripts are checked against a persisted fingerprint of the processed bytes; truncation, replacement, same-length rewrites and edits beyond the original prefix are replayed and deduplicated. Antigravity checks DB/WAL and transcript timestamps and lengths, and restarts unfinished batches when the file changes. Files whose metadata remains unchanged are skipped; modifications deliberately preserving both length and filesystem timestamps are outside this detection contract.
+
+## Antigravity sources
+
+Default roots are `~/.gemini/antigravity` (IDE/app) and `~/.gemini/antigravity-cli`. Each has an enable switch and editable path. Existing default directories are enabled when upgrading legacy settings; saved thresholds, pause state and custom Claude paths survive. A source error does not stop the other sources. New installations using `~/.gemini/antigravity-ide` can point the IDE source there.
+
+The adapter reads `conversations/<id>.db` with SQLite read-only/WAL connections and a short busy timeout. Locks retry next poll. Step metadata supplies usage; generation metadata supplies only explicitly linked models. Generation totals are never added to step totals. Final snapshots replace counters, so later corrections can reduce them. Response and checkpoint/compaction calls are separate types and both are included by default. Completed, cleared, cancelled, error and interrupted steps with recorded usage are retained. Pending/running/generating/waiting steps are excluded. Terminal model steps with no usage remain incomplete, with unknown cache counters and no alert.
+
+When a session database is absent, only `.system_generated/logs/transcript.jsonl` is read; `transcript_full.jsonl` is excluded. Source instance + raw session + step index is the identity. A later native database enriches the same rows. Summary databases and explicit subagent descriptors supply titles, workspace and parent relationships; child calls are counted once, never added again to a parent total. Each call exports its source, raw session, parent, type, completion state, usage completeness and metadata source.
+
+Only new, sufficiently complete terminal usage qualifies for an alert. Startup history, cleared steps, rescans, fallback promotion and metadata enrichment do not create new notifications. Missing JSON cache fields remain unknown; omitted scalars in the recognized native protobuf usage schema have its default zero value. Incomplete first observations remain silent if later enriched. A source's call timestamp establishes the startup cutoff.
+
+**Source** and **Call type** filters are shared by history, statistics, trends and the current-page JSON export. Search and history pagination remain independent of the statistics time interval.
 
 ## History and notifications
 
@@ -38,7 +50,17 @@ Input, 5-minute cache writes, 1-hour cache writes, cache reads and output are pr
 
 Under **API billing rates**, select or enter an exact model ID to override its five rates in USD per million tokens. Custom rates are final effective rates: they replace the model's tiers and fast/region modifiers, so include those premiums yourself. Overrides apply to existing history and exports immediately. **Use published rates** removes an override; unknown models remain **Pricing needed**, never silently priced as another model or as zero. Unknown fast-mode pricing also needs custom rates.
 
-On the first upgrade, the database migration preserves calls, alerts and settings, and resets file cursors once to refill billing metadata and titles. This replay uses the existing silent startup-import behavior. Missing original transcripts cannot be backfilled; duration/speed/geography assumptions remain visible for those rows. No historical alerts are intentionally replayed.
+Database migration is transactional and preserves calls, alert outcomes, settings, custom Claude rates and file cursors. Existing calls are classified as Claude Code. Antigravity identities are namespaced by source instance; IDE and CLI share only their reference-pricing family. No historical alerts are intentionally replayed.
+
+## Antigravity reference prices
+
+Reference API estimates are **not actual subscription deductions or quota consumption**. Exact supported model IDs use [Google Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) or [Anthropic API pricing](https://platform.claude.com/docs/en/about-claude/pricing), verified 2026-11-09. Internal IDs such as `gemini-pro-default` and numeric placeholders are not guessed. Unknown models or missing dimensions are marked unpriced/unknown.
+
+Gemini 4 Argon standard rates per million tokens are input $2 / cache read $0.10 / output $10 before 2026-12-01, then $4 / $0.20 / $20. Gemini 3.6/3.7/3.8 Flash introductory rates are $0.75 / $0.075 / $3.75 through 2026-12-31, then $1.50 / $0.15 / $7.50. Gemini 2.5 Pro uses $1.25 / $0.125 / $10 up to 200k prompt tokens, then $2.50 / $0.25 / $15. Dates use the recorded call time; these are a verified price snapshot, not an exhaustive historical tariff database.
+
+Output already includes thinking and is charged once. Antigravity does not report cache TTL or all storage/tool/region/service-tier billing dimensions; these are excluded and noted. JSON fallback cache-write usage and unreported web-search costs export `null` amounts. Native cache-write usage can be zero, but positive writes without a verified TTL remain unpriced unless explicit custom effective rates are supplied. Under API billing rates, choose the source family: Antigravity IDE and CLI share overrides, while old Claude overrides are preserved separately.
+
+For aggregate read-only verification without running the tray app, run `"Claude Cache Watch.exe" --verify-antigravity --report audit.json`. The report compares native counters with independent transcript counters, imported records and statistics, including incomplete/undated records and historical alert counts. It contains aggregate data only. `CACHE_WATCH_DATA_DIR` can isolate a manual smoke-test profile; the default profile is unchanged.
 
 ## Statistics interval
 

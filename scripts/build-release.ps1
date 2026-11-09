@@ -31,7 +31,8 @@ try {
     $env:CARGO_ENCODED_RUSTFLAGS = $releaseFlags -join [char]31
     & "$releaseProjectDir/node_modules/.bin/tauri.cmd" build --no-bundle --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed" }
-    $releaseExecutable = Join-Path $releaseProjectDir "src-tauri/target/x86_64-pc-windows-msvc/release/claude-cache-watch.exe"
+    $releaseTargetDir = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $releaseProjectDir "src-tauri/target" }
+    $releaseExecutable = Join-Path $releaseTargetDir "x86_64-pc-windows-msvc/release/claude-cache-watch.exe"
     & node scripts/audit-public.mjs --artifact $releaseExecutable
     if ($LASTEXITCODE -ne 0) { throw "Public artifact audit failed" }
     $releaseOutput = Join-Path $releaseProjectDir "dist/releases"

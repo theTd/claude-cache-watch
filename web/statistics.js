@@ -34,8 +34,8 @@
     set("output", number(stats.output)); set("output-note", `${number(stats.total_input + stats.output)} total tokens`);
     set("uncached", number(stats.uncached)); set("uncached-note", `Peak call ${number(stats.max_uncached)} · average ${number(Math.round(stats.calls ? stats.uncached / stats.calls : 0))}`);
     set("read", number(stats.cache_reads)); set("read-note", `${percent(stats.cache_reads, stats.total_input)} of input cached · ${usd(stats.cache_read_discount_usd)} read discount vs fresh input`);
-    set("write", number(stats.cache_writes)); set("write-note", `${number(stats.cache_1h)} known 1h write tokens`);
-    set("misses", number(stats.zero_cache_calls)); set("misses-note", `${percent(stats.zero_cache_calls, stats.calls)} of calls`);
+    set("write", number(stats.cache_writes)); set("write-note", `${number(stats.cache_1h)} known 1h write tokens · ${number(stats.unknown_write_calls ?? 0)} calls with unknown writes`);
+    set("misses", number(stats.zero_cache_calls)); set("misses-note", `${percent(stats.zero_cache_calls, stats.calls)} of calls · ${number(stats.unknown_cache_calls ?? 0)} unknown cache readings`);
     set("expensive", number(stats.expensive_calls));
     set("alerts", number(stats.alerts_sent)); set("alerts-note", `${number(stats.alerts_failed)} failed · ${number(stats.alerts_pending)} queued`);
     set("sessions", number(stats.sessions)); set("sessions-note", `${number(stats.subagents)} subagents · ${number(stats.projects)} projects`);
@@ -47,7 +47,7 @@
       for (const [index, value] of values.entries()) { const td = document.createElement("td"); td.textContent = value; if (index) td.className = "num"; tr.append(td); }
       return tr;
     }));
-    byId("statistics-state").textContent = `${interval.live ? "Updated" : "Historical snapshot"} ${date(Date.now())} · ${number(stats.undated_calls)} calls without valid timestamps are excluded from interval statistics.`;
+    byId("statistics-state").textContent = `${interval.live ? "Updated" : "Historical snapshot"} ${date(Date.now())} · ${number(stats.undated_calls)} calls without valid timestamps are excluded from interval statistics. ${number(stats.unknown_usage_calls ?? 0)} calls have incomplete usage. Totals include recorded counters; costs are reference estimates, not subscription charges.`;
     window.renderTrends?.(stats.trend);
   }
   async function update() {
@@ -58,7 +58,7 @@
     const { start, end } = interval.bounds();
     labels();
     try {
-      const stats = await invoke("statistics", { startMs: start, endMs: end });
+      const stats = await invoke("statistics", { startMs: start, endMs: end, filter:window.cacheWatchFilter?.() });
       if (currentVersion !== version) return;
       interval.earliest = stats.earliest_ms ?? interval.anchor - 86400000;
       syncSliders(); render(stats, start, end);

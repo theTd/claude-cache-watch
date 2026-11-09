@@ -1,7 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod antigravity;
+mod claude;
+mod file_fingerprint;
 mod monitor;
 mod pricing;
+mod protobuf;
+mod reference_pricing;
 mod statistics;
 mod store;
 mod titles;
@@ -31,6 +36,7 @@ use winrt_notification::{Duration as ToastDuration, Toast};
 struct CachedSnapshot {
     version: u64,
     search: String,
+    filter: store::Filter,
     alerts_only: bool,
     page: u32,
     settings: Settings,
@@ -38,6 +44,7 @@ struct CachedSnapshot {
 }
 
 struct CachedStatistics {
+    filter: store::Filter,
     version: u64,
     start_ms: Option<i64>,
     end_ms: i64,
@@ -79,13 +86,17 @@ async fn snapshot(
     search: String,
     alerts_only: bool,
     page: u32,
+    filter: Option<store::Filter>,
 ) -> Result<Snapshot, String> {
+    let filter = filter.unwrap_or_default();
+    filter.validate()?;
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let version = shared.data_version.load(Ordering::Acquire);
         if let Ok(guard) = shared.snapshot_cache.lock() {
             if let Some(cached) = guard.as_ref() {
                 if cached.version == version
+                    && cached.filter == filter
                     && cached.search == search
                     && cached.alerts_only == alerts_only
                     && cached.page == page
@@ -102,13 +113,15 @@ async fn snapshot(
         let db = shared.reader.lock();
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
         let settings = store::settings(&tx)?;
-        let history = store::history(&tx, &search, alerts_only, page).map_err(|e| e.to_string())?;
+        let history = store::history_filtered(&tx, &search, alerts_only, page, &filter)
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         drop(db);
         if let Ok(mut guard) = shared.snapshot_cache.lock() {
             *guard = Some(CachedSnapshot {
                 version,
                 search,
+                filter,
                 alerts_only,
                 page,
                 settings: settings.clone(),
@@ -127,16 +140,31 @@ async fn snapshot(
 }
 
 #[tauri::command]
-async fn save_settings(state: State<'_, Arc<Shared>>, settings: Settings) -> Result<(), String> {
+async fn save_settings(
+    state: State<'_, Arc<Shared>>,
+    mut settings: Settings,
+) -> Result<(), String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         if settings.threshold <= 0 || settings.threshold > 1_000_000_000 {
             return Err("Threshold must be between 1 and 1,000,000,000 tokens".into());
         }
-        if !std::path::Path::new(&settings.source).is_absolute()
-            || !std::path::Path::new(&settings.source).is_dir()
-        {
-            return Err("Choose an existing absolute Claude projects folder".into());
+        settings.normalize();
+        let mut kinds = std::collections::HashSet::new();
+        for source in &settings.sources {
+            if !matches!(
+                source.kind.as_str(),
+                "claude" | "antigravity_ide" | "antigravity_cli"
+            ) || !kinds.insert(&source.kind)
+            {
+                return Err("Choose one configuration per supported source".into());
+            }
+            if !std::path::Path::new(&source.path).is_absolute() {
+                return Err("Source paths must be absolute".into());
+            }
+            if source.enabled && !std::path::Path::new(&source.path).is_dir() {
+                return Err(format!("Source folder unavailable: {}", source.path));
+            }
         }
         let db = shared.db.lock();
         let res = store::save_settings(&db, &settings);
@@ -183,7 +211,13 @@ async fn set_model_rates(
     state: State<'_, Arc<Shared>>,
     model: String,
     rates: Option<pricing::Rates>,
+    family: Option<String>,
 ) -> Result<(), String> {
+    let family = family.unwrap_or_else(|| "claude".into());
+    if !matches!(family.as_str(), "claude" | "antigravity") {
+        return Err("Unknown pricing family".into());
+    }
+    let model = reference_pricing::key(&family, &model);
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let db = shared.db.lock();
@@ -202,7 +236,10 @@ async fn statistics(
     state: State<'_, Arc<Shared>>,
     start_ms: Option<i64>,
     end_ms: i64,
+    filter: Option<store::Filter>,
 ) -> Result<statistics::Statistics, String> {
+    let filter = filter.unwrap_or_default();
+    filter.validate()?;
     if start_ms.is_some_and(|start| start > end_ms) {
         return Err("The interval start must be before its end".into());
     }
@@ -221,6 +258,7 @@ async fn statistics(
                     _ => false,
                 };
                 if cached.version == version
+                    && cached.filter == filter
                     && same_window
                     && cached
                         .stats
@@ -238,12 +276,13 @@ async fn statistics(
         let db = shared.reader.lock();
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
         let settings = store::settings(&tx)?;
-        let result =
-            statistics::calculate(&tx, start_ms, end_ms, &settings).map_err(|e| e.to_string())?;
+        let result = statistics::calculate_filtered(&tx, start_ms, end_ms, &settings, &filter)
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         drop(db);
         if let Ok(mut guard) = shared.stats_cache.lock() {
             *guard = Some(CachedStatistics {
+                filter,
                 version,
                 start_ms,
                 end_ms,
@@ -271,13 +310,16 @@ async fn export_history_page(
     search: String,
     alerts_only: bool,
     page: u32,
+    filter: Option<store::Filter>,
 ) -> Result<String, String> {
+    let filter = filter.unwrap_or_default();
+    filter.validate()?;
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let rows = {
             let db = shared.reader.lock();
             let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-            let rows = store::history(&tx, &search, alerts_only, page)
+            let rows = store::history_filtered(&tx, &search, alerts_only, page, &filter)
                 .map_err(|e| e.to_string())?
                 .rows;
             tx.commit().map_err(|e| e.to_string())?;
@@ -310,7 +352,7 @@ async fn export_history_page(
 fn deliver_pending(shared: &Shared) -> Result<(), String> {
     let rows = {
         let db = shared.db.lock();
-        let mut query=db.prepare("SELECT id,input+creation,read,model FROM calls WHERE alert='pending' ORDER BY timestamp LIMIT 10").map_err(|e| e.to_string())?;
+        let mut query=db.prepare("SELECT id,input+creation,read,model,source_kind,raw_session FROM calls WHERE alert='pending' ORDER BY timestamp LIMIT 10").map_err(|e| e.to_string())?;
         let rows = query
             .query_map([], |r| {
                 Ok((
@@ -318,6 +360,8 @@ fn deliver_pending(shared: &Shared) -> Result<(), String> {
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -328,10 +372,10 @@ fn deliver_pending(shared: &Shared) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());
     }
-    for (id, uncached, read, model) in rows {
+    for (id, uncached, read, model, source, session) in rows {
         let result = notify(
-            "Claude Code - high uncached input",
-            &format!("{uncached} uncached tokens | {read} cache-read tokens | {model}"),
+            &format!("{source} - high uncached input"),
+            &format!("{uncached} uncached tokens | {read} cache-read tokens | {model} | {session}"),
         );
         let (status, error) = match result {
             Ok(()) => ("sent", String::new()),
@@ -351,7 +395,9 @@ fn deliver_pending(shared: &Shared) -> Result<(), String> {
 }
 
 fn run_monitor(shared: Arc<Shared>) {
-    let mut scanner = Scanner::new();
+    let mut scanners: std::collections::HashMap<String, Scanner> = std::collections::HashMap::new();
+    let mut agy_scanners: std::collections::HashMap<String, antigravity::Scanner> =
+        std::collections::HashMap::new();
     let mut checked_pending_once = false;
     loop {
         let mut files = 0;
@@ -364,24 +410,51 @@ fn run_monitor(shared: Arc<Shared>) {
             if settings.paused {
                 return Ok(());
             }
-            let paths = scanner.discover(&settings.source)?;
-            files = paths.len();
             let mut errors = Vec::new();
             let mut scanned_any = false;
-            for path in paths {
-                if scanner.is_unchanged(&path) {
+            for source in settings.sources.iter().filter(|s| s.enabled) {
+                let identity = format!("{}:{}", source.kind, source.path);
+                if source.kind != "claude" {
+                    let scanner = agy_scanners.entry(identity).or_default();
+                    let result = {
+                        let mut db = shared.db.lock();
+                        scanner.scan(&mut db, source, &settings)
+                    };
+                    files += scanner.files;
+                    importing |= scanner.importing;
+                    match result {
+                        Ok(changed) => scanned_any |= changed,
+                        Err(e) => {
+                            errors.push(format!("{}: {e}", source.kind));
+                            scanned_any = true;
+                        }
+                    }
                     continue;
                 }
-                scanned_any = true;
-                let result = {
-                    let mut db = shared.db.lock();
-                    scanner.scan_file(&mut db, &path, &settings)
+                let scanner = scanners.entry(identity).or_insert_with(Scanner::new);
+                let paths = match scanner.discover(&source.path) {
+                    Ok(paths) => paths,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
                 };
-                match result {
-                    Ok(pending) => importing |= pending,
-                    Err(error) => {
-                        if errors.len() < 3 {
-                            errors.push(error);
+                files += paths.len();
+                for path in paths {
+                    if scanner.is_unchanged(&path) {
+                        continue;
+                    }
+                    scanned_any = true;
+                    let result = {
+                        let mut db = shared.db.lock();
+                        scanner.scan_file(&mut db, &path, &settings)
+                    };
+                    match result {
+                        Ok(pending) => importing |= pending,
+                        Err(e) => {
+                            if errors.len() < 6 {
+                                errors.push(e);
+                            }
                         }
                     }
                 }
@@ -421,6 +494,13 @@ fn show(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--verify-antigravity") {
+        if let Err(e) = verify_antigravity() {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
         .invoke_handler(tauri::generate_handler![
@@ -435,7 +515,9 @@ fn main() {
             export_history_page
         ])
         .setup(|app| {
-            let data_path = app.path().app_local_data_dir()?;
+            let data_path = std::env::var_os("CACHE_WATCH_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or(app.path().app_local_data_dir()?);
             std::fs::create_dir_all(&data_path)?;
             let db_path = data_path.join("history.sqlite3");
             let db = store::open(&db_path)?;
@@ -492,4 +574,72 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("Could not start Claude Cache Watch");
+}
+
+fn verify_antigravity() -> Result<(), String> {
+    let args: Vec<_> = std::env::args().collect();
+    let destination = args
+        .iter()
+        .position(|a| a == "--report")
+        .and_then(|i| args.get(i + 1))
+        .ok_or("Specify --report file.json")?;
+    let mut db = store::open(std::path::Path::new(":memory:")).map_err(|e| e.to_string())?;
+    let mut settings = Settings::default();
+    settings.normalize();
+    let mut reports = serde_json::Map::new();
+    let mut passed = true;
+    for source in settings
+        .sources
+        .iter()
+        .filter(|s| s.enabled && s.kind != "claude")
+    {
+        let mut scanner = antigravity::Scanner::new();
+        loop {
+            scanner.scan(&mut db, source, &settings)?;
+            if !scanner.importing {
+                break;
+            }
+        }
+        let check = antigravity::crosscheck(std::path::Path::new(&source.path))?;
+        let filter = store::Filter {
+            source: source.kind.clone(),
+            kind: String::new(),
+        };
+        let history =
+            store::history_filtered(&db, "", false, 0, &filter).map_err(|e| e.to_string())?;
+        let stats = statistics::calculate_filtered(
+            &db,
+            None,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+            &settings,
+            &filter,
+        )
+        .map_err(|e| e.to_string())?;
+        let totals:(i64,i64,i64,i64)=db.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(input),0),COALESCE(SUM(read),0),COALESCE(SUM(output),0) FROM calls WHERE source_kind=?1 AND metadata_source='antigravity_sqlite'",
+            [&source.kind],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?;
+        let matches = totals.0
+            == check["native_calls"].as_i64().unwrap_or(0)
+                + check["native_incomplete_calls"].as_i64().unwrap_or(0)
+            && Some(totals.1) == check["input_tokens"].as_i64()
+            && Some(totals.2) == check["cache_read_tokens"].as_i64()
+            && Some(totals.3) == check["output_tokens"].as_i64()
+            && check["mismatched_or_transcript_only_calls"] == 0
+            && history.alerts == 0;
+        passed &= matches;
+        reports.insert(source.kind.clone(),serde_json::json!({"passed":matches,"crosscheck":check,"imported_calls":history.calls,"alerts":history.alerts,"statistics":stats}));
+    }
+    std::fs::write(
+        destination,
+        serde_json::to_vec_pretty(&reports).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if passed {
+        Ok(())
+    } else {
+        Err("Antigravity verification mismatch; inspect the saved aggregate report and retry if sources are actively changing".into())
+    }
 }

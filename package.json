@@ -1,13 +1,13 @@
 {
   "name": "claude-cache-watch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable Windows tray monitor for Claude Code usage, cache misses, API cost estimates, and live trends.",
   "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "tauri dev",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs tests/refresh-scheduler.test.cjs tests/release-tools.test.mjs",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/statistics-ui.test.cjs tests/trend-charts.test.cjs tests/refresh-scheduler.test.cjs tests/release-tools.test.mjs tests/source-integration.test.cjs",
     "check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "version:check": "node scripts/version.mjs check",
     "version:bump": "node scripts/version.mjs bump",

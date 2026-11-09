@@ -1,7 +1,4 @@
-use crate::{
-    store, titles,
-    usage::{Settings, Usage},
-};
+use crate::{store, titles, usage::Settings};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
@@ -202,6 +199,8 @@ impl Scanner {
     }
 }
 
+use crate::file_fingerprint::processed as fingerprint;
+
 fn scan_file(
     conn: &mut Connection,
     path: &Path,
@@ -232,7 +231,12 @@ fn scan_file(
             *baseline = None;
         }
         let import_until = baseline.as_ref().map_or(0, |b| b.length);
-        let replaced = offset > length || !prefix.starts_with(&old_signature);
+        let replaced = offset > length
+            || if old_signature.starts_with(b"CCW2") {
+                fingerprint(&mut file, offset)? != old_signature
+            } else {
+                !prefix.starts_with(&old_signature)
+            };
         if replaced {
             offset = 0;
         }
@@ -266,7 +270,7 @@ fn scan_file(
             }
             if let Ok(value) = serde_json::from_slice(&line) {
                 titles::record_line(&tx, &value, path)?;
-                if let Some(mut usage) = Usage::from_value(&value) {
+                if let Some(mut usage) = crate::claude::parse(&value) {
                     let (session, agent) = titles::identity(path);
                     if usage.session.is_empty() {
                         usage.session = session;
@@ -286,7 +290,7 @@ fn scan_file(
             offset += read as u64;
         }
         tx.execute("INSERT INTO cursors VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,signature=excluded.signature",
-            params![path_text.as_ref(), i64::try_from(offset)?, prefix])?;
+            params![path_text.as_ref(), i64::try_from(offset)?, fingerprint(reader.get_mut(),offset)?])?;
         tx.commit()?;
         Ok(ScanProgress {
             importing: offset < import_until && offset < length,
@@ -398,6 +402,24 @@ mod tests {
                     .set_modified(old_time + std::time::Duration::from_secs(1)),
             )
             .unwrap();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        assert_eq!(store::history(&db, "", false, 0).unwrap().calls, 2);
+    }
+
+    #[test]
+    fn edits_after_an_unchanged_prefix_are_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let prefix = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(1024));
+        std::fs::write(&path, format!("{prefix}{}", line("old"))).unwrap();
+        let mut db = store::open(Path::new(":memory:")).unwrap();
+        let mut scanner = Scanner::new();
+        scanner
+            .scan_file(&mut db, &path, &Settings::default())
+            .unwrap();
+        std::fs::write(&path, format!("{prefix}{}", line("new"))).unwrap();
         scanner
             .scan_file(&mut db, &path, &Settings::default())
             .unwrap();

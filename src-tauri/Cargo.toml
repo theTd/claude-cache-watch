@@ -1,6 +1,6 @@
 [package]
 name = "claude-cache-watch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Portable Windows tray monitor for Claude Code usage, cache misses, API cost estimates, and live trends."
 license = "MIT"

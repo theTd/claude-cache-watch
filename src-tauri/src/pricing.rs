@@ -122,10 +122,10 @@ pub struct Tokens {
 pub struct Estimate {
     pub total_usd: f64,
     pub input_usd: f64,
-    pub cache_write_usd: f64,
+    pub cache_write_usd: Option<f64>,
     pub cache_read_usd: f64,
     pub output_usd: f64,
-    pub web_search_usd: f64,
+    pub web_search_usd: Option<f64>,
     pub rates_per_million: Rates,
     pub basis: String,
     pub notes: Vec<String>,
@@ -191,10 +191,10 @@ pub fn estimate(
     Some(Estimate {
         total_usd: input_usd + cache_write_usd + cache_read_usd + output_usd + web_search_usd,
         input_usd,
-        cache_write_usd,
+        cache_write_usd: Some(cache_write_usd),
         cache_read_usd,
         output_usd,
-        web_search_usd,
+        web_search_usd: Some(web_search_usd),
         rates_per_million: rates,
         basis: if custom.is_some() {
             "Custom effective USD rates".into()

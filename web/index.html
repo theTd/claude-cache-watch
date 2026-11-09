@@ -21,6 +21,11 @@
     <div id="error" class="error" role="alert" hidden></div>
     <section class="panel interval" aria-label="Statistics interval">
       <div class="section-heading"><h2>Statistics interval</h2><span id="interval-mode">Live · follows now</span></div>
+      <div class="filters source-filters">
+        <label>Source<select id="source-filter"><option value="">All sources</option><option value="claude">Claude Code</option><option value="antigravity_ide">Antigravity IDE</option><option value="antigravity_cli">Antigravity CLI</option></select></label>
+        <label>Call type<select id="kind-filter"><option value="">All calls</option><option value="response">Responses</option><option value="checkpoint">Context compaction</option><option value="other">Other model calls</option></select></label>
+        <span class="note">Applies to history, charts and exports</span>
+      </div>
       <div class="interval-presets"><button data-hours="1">Last hour</button><button data-hours="24">24 hours</button><button data-hours="168">7 days</button><button data-hours="all">All history</button></div>
       <div class="interval-axis"><span>NOW · LIVE</span><span>OLDER</span></div>
       <div class="range-track">
@@ -28,7 +33,7 @@
         <input id="interval-older" type="range" min="0" max="1000" step="1" value="1000" aria-label="Older end of statistics interval">
       </div>
       <div class="interval-dates"><span id="interval-recent-label">Now</span><span id="interval-older-label">All history</span></div>
-      <p class="note">Left is recent, right is older. Keep the recent handle at the far left for live updates; move it right to freeze a historical interval. The scale gives more room to recent periods. Cards, charts and model totals use this interval; call history below has its own search.</p>
+      <p class="note">Left is recent, right is older. Keep the recent handle at the far left for live updates; move it right to freeze a historical interval. The scale gives more room to recent periods. Cards, charts and model totals use this interval; call history below has its own search. Source and call-type filters apply everywhere.</p>
       <p id="statistics-state" role="status" class="note">Loading statistics…</p>
     </section>
     <section id="trend-panel" class="panel trends" aria-label="Metric trends">
@@ -56,17 +61,22 @@
     <section class="panel settings">
       <div class="section-heading"><h2>Watch settings</h2><span>Checks every 3 seconds · Close window to keep watching</span></div>
       <form id="settings-form">
-        <label class="source">Claude projects folder<input id="source" required spellcheck="false" placeholder="C:\Users\you\.claude\projects"></label>
+        <label class="check"><input id="enabled-claude" type="checkbox" checked>Claude Code</label><label class="source">Claude projects folder<input id="source" required spellcheck="false" placeholder="C:\Users\you\.claude\projects"></label>
+        <label class="check"><input id="enabled-antigravity_ide" type="checkbox">Antigravity IDE</label>
+        <label class="source">Antigravity IDE data folder<input id="source-antigravity_ide" spellcheck="false" placeholder="C:\Users\you\.gemini\antigravity"></label>
+        <label class="check"><input id="enabled-antigravity_cli" type="checkbox">Antigravity CLI</label>
+        <label class="source">Antigravity CLI data folder<input id="source-antigravity_cli" spellcheck="false" placeholder="C:\Users\you\.gemini\antigravity-cli"></label>
         <label>Uncached threshold<input id="threshold" type="number" min="1" max="1000000000" step="1" value="100000" required></label>
         <label class="check"><input id="zero-cache" type="checkbox">Only when cache reads = 0</label>
         <label class="check"><input id="paused" type="checkbox">Pause monitoring</label>
         <div class="actions"><button type="submit" class="primary">Save settings</button><button type="button" id="test">Test desktop alert</button><button type="button" id="data">Open data folder</button><span id="feedback" role="status"></span></div>
       </form>
-      <p class="note">Alerts fire when ordinary input + cache-write tokens strictly exceed the threshold. Cache reads and output tokens are excluded. Existing logs are imported silently when the app starts or the folder changes. No prompts or responses are stored.</p>
+      <p class="note">Alerts fire when ordinary input + cache-write tokens strictly exceed the threshold. Cache reads and output tokens are excluded. Existing logs are imported silently when the app starts or the folder changes. No prompts or responses are stored. Missing usage is marked unknown. Native Antigravity databases include recorded responses, context compactions and cancelled calls; unrecorded internal requests cannot be observed.</p>
       <details id="pricing-panel">
         <summary>API billing rates</summary>
-        <p class="note">Estimates use Anthropic USD list prices verified October 16, 2026, with cache duration, fast mode, US inference and Haiku prompt tiers when recorded. These are estimated API costs; subscription usage is not a separate API invoice.</p>
+        <p class="note">Estimates use Anthropic USD list prices verified October 16, 2026, with cache duration, fast mode, US inference and Haiku prompt tiers when recorded. Antigravity uses separately scoped reference API prices verified November 9, 2026, not subscription billing; unavailable prices remain unpriced. These are estimated API costs; subscription usage is not a separate API invoice.</p>
         <form id="rates-form">
+          <label>Pricing source<select id="rate-family"><option value="claude">Claude Code API</option><option value="antigravity">Antigravity reference (IDE + CLI)</option></select></label>
           <label class="rate-model">Model ID<input id="rate-model" list="rate-models" required spellcheck="false" placeholder="claude-opus-5-5"><datalist id="rate-models"></datalist></label>
           <label>Input / million<input id="rate-input" type="number" min="0" max="1000000" step="any" required></label>
           <label>5m writes / million<input id="rate-cache_5m" type="number" min="0" max="1000000" step="any" required></label>
@@ -75,7 +85,7 @@
           <label>Output / million<input id="rate-output" type="number" min="0" max="1000000" step="any" required></label>
           <div class="actions"><button class="primary" type="submit">Save custom rates</button><button id="reset-rates" type="button">Use published rates</button><span id="rate-feedback" role="status"></span></div>
         </form>
-        <p class="note">Custom rates are final effective USD rates: include any provider, speed or region premiums yourself. They replace model tiers and modifiers for this exact model ID and recalculate existing history. Unknown models show Pricing needed until configured. Recorded web searches add $0.01 each.</p>
+        <p class="note">Custom rates are final effective USD rates: include any provider, speed or region premiums yourself. They replace model tiers and modifiers for this exact source family and model ID and recalculate existing history. Antigravity excludes unreported storage and tool charges; thinking is already included in output. Unknown models show Pricing needed until configured. Recorded web searches add $0.01 each.</p>
       </details>
     </section>
     <section class="panel history">

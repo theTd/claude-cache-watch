@@ -1,5 +1,5 @@
 use crate::{
-    pricing::{self, Estimate, Metadata, Tokens},
+    pricing::{Estimate, Metadata, Tokens},
     store,
     usage::Settings,
 };
@@ -34,6 +34,9 @@ pub struct Metrics {
     pub total_input: i64,
     pub cache_read_discount_usd: f64,
     pub zero_cache_calls: u64,
+    pub unknown_usage_calls: u64,
+    pub unknown_cache_calls: u64,
+    pub unknown_write_calls: u64,
     pub expensive_calls: u64,
     pub alerts_sent: u64,
     pub alerts_failed: u64,
@@ -79,6 +82,10 @@ struct Accumulator {
 }
 
 struct Call<'a> {
+    source: &'a str,
+    complete: bool,
+    cache_known: bool,
+    creation_known: bool,
     model: &'a str,
     tokens: Tokens,
     metadata: &'a Metadata,
@@ -107,9 +114,16 @@ impl Accumulator {
         m.total_input = m
             .total_input
             .saturating_add(uncached.saturating_add(t.read));
-        m.zero_cache_calls += u64::from(t.read == 0);
-        m.expensive_calls +=
-            u64::from(uncached > settings.threshold && (!settings.zero_cache_only || t.read == 0));
+        m.unknown_usage_calls += u64::from(!call.complete);
+        m.unknown_cache_calls += u64::from(!call.cache_known);
+        m.unknown_write_calls += u64::from(!call.creation_known);
+        m.zero_cache_calls += u64::from(call.cache_known && t.read == 0);
+        m.expensive_calls += u64::from(
+            call.complete
+                && call.cache_known
+                && uncached > settings.threshold
+                && (!settings.zero_cache_only || t.read == 0),
+        );
         match call.alert {
             "sent" => m.alerts_sent += 1,
             "failed" => m.alerts_failed += 1,
@@ -126,13 +140,14 @@ impl Accumulator {
         if !call.project.is_empty() && !self.projects.contains(call.project) {
             self.projects.insert(call.project.to_owned());
         }
-        let by_model = if let Some(by_model) = self.models.get_mut(call.model) {
+        let model_key = format!("{} · {}", call.source, call.model);
+        let by_model = if let Some(by_model) = self.models.get_mut(&model_key) {
             by_model
         } else {
             self.models
-                .entry(call.model.to_owned())
+                .entry(model_key.clone())
                 .or_insert_with(|| ModelStatistics {
-                    model: call.model.to_owned(),
+                    model: model_key,
                     ..ModelStatistics::default()
                 })
         };
@@ -172,19 +187,41 @@ fn bucket_width(span_ms: i64) -> i64 {
     .unwrap_or_else(|| (target / 86400000 + 1).saturating_mul(86400000))
 }
 
+#[cfg(test)]
 pub fn calculate(
     conn: &Connection,
     start_ms: Option<i64>,
     end_ms: i64,
     settings: &Settings,
 ) -> rusqlite::Result<Statistics> {
+    calculate_filtered(conn, start_ms, end_ms, settings, &store::Filter::default())
+}
+
+pub fn calculate_filtered(
+    conn: &Connection,
+    start_ms: Option<i64>,
+    end_ms: i64,
+    settings: &Settings,
+    filter: &store::Filter,
+) -> rusqlite::Result<Statistics> {
     let rates = store::load_rates(conn)?;
-    let (earliest,latest):(Option<f64>,Option<f64>)=conn.query_row("SELECT (SELECT MIN(julianday(timestamp)) FROM calls),(SELECT MAX(julianday(timestamp)) FROM calls)",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let scope = format!(
+        "source_kind IN ({}) AND call_kind IN ({})",
+        store::sql_sources(filter),
+        store::sql_kinds(filter)
+    );
+    let (earliest, latest): (Option<f64>, Option<f64>) = conn.query_row(
+        &format!(
+            "SELECT MIN(julianday(timestamp)),MAX(julianday(timestamp)) FROM calls WHERE {scope}"
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let epoch_ms = |jd: f64| ((jd - 2440587.5) * 86_400_000.).round() as i64;
     let earliest_ms = earliest.map(epoch_ms);
     let latest_ms = latest.map(epoch_ms);
     let undated_calls = conn.query_row(
-        "SELECT COUNT(*) FROM calls WHERE julianday(timestamp) IS NULL",
+        &format!("SELECT COUNT(*) FROM calls WHERE julianday(timestamp) IS NULL AND {scope}"),
         [],
         |r| r.get(0),
     )?;
@@ -196,8 +233,8 @@ pub fn calculate(
     let count = ((span - 1) / width + 1).clamp(1, 60) as usize;
     let mut buckets: Vec<_> = (0..count).map(|_| Accumulator::default()).collect();
     let mut overall = Accumulator::default();
-    let mut query=conn.prepare("SELECT model,input,creation,read,output,cache_1h,speed,geo,searches,session,agent_id,project,alert,julianday(timestamp)
-        FROM calls WHERE julianday(timestamp)>=COALESCE(julianday(?1/1000.0,'unixepoch'),0) AND julianday(timestamp)<=julianday(?2/1000.0,'unixepoch')")?;
+    let mut query=conn.prepare(&format!("SELECT model,input,creation,read,output,cache_1h,speed,geo,searches,session,agent_id,project,alert,julianday(timestamp),source_kind,usage_complete,cache_known,creation_known,timestamp
+        FROM calls WHERE {scope} AND julianday(timestamp)>=COALESCE(julianday(?1/1000.0,'unixepoch'),0) AND julianday(timestamp)<=julianday(?2/1000.0,'unixepoch')"))?;
     let mut rows = query.query(params![start_ms, end_ms])?;
     while let Some(row) = rows.next()? {
         let model: String = row.get(0)?;
@@ -218,8 +255,29 @@ pub fn calculate(
         let project: String = row.get(11)?;
         let alert: String = row.get(12)?;
         let timestamp = epoch_ms(row.get(13)?);
-        let estimate = pricing::estimate(&model, tokens, &meta, &rates);
+        let source: String = row.get(14)?;
+        let complete: bool = row.get(15)?;
+        let cache_known: bool = row.get(16)?;
+        let creation_known: bool = row.get(17)?;
+        let recorded_time: String = row.get(18)?;
+        let estimate = crate::reference_pricing::estimate(
+            crate::reference_pricing::Context {
+                source: &source,
+                model: &model,
+                timestamp: &recorded_time,
+                complete,
+                cache_known,
+                creation_known,
+            },
+            tokens,
+            &meta,
+            &rates,
+        );
         let call = Call {
+            source: &source,
+            complete,
+            cache_known,
+            creation_known,
             model: &model,
             tokens,
             metadata: &meta,

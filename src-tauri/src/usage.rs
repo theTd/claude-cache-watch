@@ -1,10 +1,12 @@
 use crate::pricing::Metadata;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub source: String,
+    #[serde(default)]
+    pub sources: Vec<SourceConfig>,
     pub threshold: i64,
     pub zero_cache_only: bool,
     pub paused: bool,
@@ -17,6 +19,7 @@ impl Default for Settings {
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"));
         Self {
             source: base.join("projects").to_string_lossy().into_owned(),
+            sources: Vec::new(),
             threshold: 100_000,
             zero_cache_only: false,
             paused: false,
@@ -24,8 +27,57 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceConfig {
+    pub kind: String,
+    pub path: String,
+    pub enabled: bool,
+}
+impl Settings {
+    pub fn normalize(&mut self) {
+        if self.sources.is_empty() {
+            self.sources.push(SourceConfig {
+                kind: "claude".into(),
+                path: self.source.clone(),
+                enabled: true,
+            });
+            let home = dirs::home_dir().unwrap_or_default();
+            for (kind, folder) in [
+                ("antigravity_ide", "antigravity"),
+                ("antigravity_cli", "antigravity-cli"),
+            ] {
+                let path = home.join(".gemini").join(folder);
+                self.sources.push(SourceConfig {
+                    kind: kind.into(),
+                    enabled: path.is_dir(),
+                    path: path.to_string_lossy().into_owned(),
+                });
+            }
+        }
+        if let Some(claude) = self.sources.iter().find(|s| s.kind == "claude") {
+            self.source = claude.path.clone();
+        }
+    }
+}
+
+/// Include the source instance path so custom roots cannot collide.
+pub fn namespace(kind: &str, root: &str, session: &str) -> String {
+    let path = std::fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+    let path = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    format!("{kind}:{}:{path}:{session}", path.len())
+}
+
 #[derive(Debug)]
 pub struct Usage {
+    pub source_kind: String,
+    pub raw_session: String,
+    pub parent_session: String,
+    pub kind: String,
+    pub state: String,
+    pub usage_complete: bool,
+    pub cache_known: bool,
+    pub creation_known: bool,
+    pub metadata_source: String,
     pub id: String,
     pub timestamp: String,
     pub session: String,
@@ -42,79 +94,18 @@ pub struct Usage {
 impl Usage {
     #[cfg(test)]
     pub fn parse(line: &[u8]) -> Option<Self> {
-        let v: Value = serde_json::from_slice(line).ok()?;
-        Self::from_value(&v)
-    }
-
-    pub fn from_value(v: &Value) -> Option<Self> {
-        if v.get("type")?.as_str()? != "assistant" {
-            return None;
-        }
-        let m = v.get("message")?;
-        let usage = m.get("usage")?;
-        let input = usage.get("input_tokens")?.as_u64()?;
-        let creation = usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let read = usage
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        // SQLite INTEGER is signed. Reject corrupt/out-of-range usage instead of wrapping.
-        if input.checked_add(creation)?.checked_add(read)? > i64::MAX as u64 {
-            return None;
-        }
-        let text = |obj: &Value, key| {
-            obj.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned()
-        };
-        let id = v
-            .get("requestId")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                m.get("id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-            })?;
-        Some(Self {
-            id: id.to_owned(),
-            timestamp: text(v, "timestamp"),
-            session: text(v, "sessionId"),
-            project: text(v, "cwd"),
-            model: text(m, "model"),
-            input: input as i64,
-            creation: creation as i64,
-            read: read as i64,
-            output: usage
-                .get("output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                .min(i64::MAX as u64) as i64,
-            agent_id: text(v, "agentId"),
-            billing: Metadata {
-                cache_1h: usage
-                    .get("cache_creation")
-                    .and_then(|c| c.get("ephemeral_1h_input_tokens"))
-                    .and_then(Value::as_i64)
-                    .filter(|n| *n >= 0 && *n <= creation as i64),
-                speed: text(usage, "speed"),
-                geo: text(usage, "inference_geo"),
-                searches: usage
-                    .get("server_tool_use")
-                    .and_then(|s| s.get("web_search_requests"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0)
-                    .max(0),
-            },
-        })
+        let v: serde_json::Value = serde_json::from_slice(line).ok()?;
+        crate::claude::parse(&v)
     }
 
     pub fn matches(&self, settings: &Settings) -> bool {
-        self.input + self.creation > settings.threshold
+        self.usage_complete
+            && self.cache_known
+            && matches!(
+                self.state.as_str(),
+                "DONE" | "CANCELLED" | "ERROR" | "INTERRUPTED"
+            )
+            && self.input + self.creation > settings.threshold
             && (!settings.zero_cache_only || self.read == 0)
     }
 }

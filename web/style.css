@@ -100,3 +100,5 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: #8fa5b
 .empty { text-align: center; padding: 35px; color: #9aafc2; }
 @media (max-width: 950px) { header { padding: 24px; } main { padding: 20px; } .filters { flex-wrap: wrap; justify-content: flex-end; } #search { width: 230px; } .stats article { padding: 15px; } .section-heading > span { max-width: 250px; text-align: right; } }
 @media (max-width: 1000px) { .stats { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+
+.source-filters{margin:12px 0;flex-wrap:wrap;gap:16px}.source-filters label{display:flex;align-items:center;gap:8px}.settings .source{grid-column:1/-1}

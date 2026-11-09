@@ -1,8 +1,8 @@
 # Claude Cache Watch
 
-A portable Windows tray app for spotting expensive Claude Code cache misses and understanding API usage over time.
+A portable Windows tray app for spotting expensive Claude Code and Antigravity cache misses and understanding recorded model usage over time.
 
-It watches local Claude Code transcripts, alerts on high uncached input, and keeps searchable history with estimated API costs. Everything stays on your computer.
+It watches Claude Code transcripts and Antigravity IDE/CLI SQLite sessions, including subagents and context compaction. It alerts on high uncached input and keeps searchable history with reference API costs. Everything stays on your computer.
 
 ![Dashboard with synthetic demonstration data](docs/images/dashboard.png)
 
@@ -22,7 +22,7 @@ It watches local Claude Code transcripts, alerts on high uncached input, and kee
 
 1. Download the Windows x64 portable ZIP from this repository's **Releases** page and extract it.
 2. Run **Claude Cache Watch.exe**. Windows 10/11 x64 and Microsoft Edge WebView2 are required.
-3. Confirm the Claude projects folder. It defaults to `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects` when configured.
+3. Confirm enabled source folders. Claude defaults to `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`); Antigravity defaults to `~/.gemini/antigravity` and `~/.gemini/antigravity-cli`, enabled when present. Each source can be disabled or redirected.
 4. Use **Test desktop alert** to check notification submission, then leave the app in the tray.
 
 Closing the window keeps monitoring active. Open it again from the tray menu; **Quit monitor** stops the app. Existing logs are imported silently so your first launch does not replay historical alerts.
@@ -51,7 +51,7 @@ API costs are **estimates**, not invoices or additional charges for a Claude sub
 
 The app has no network client or telemetry and does not need an API key. It stores token counters, model/request/session identifiers, project paths, session/subagent titles and alert outcomes in local SQLite history. Full prompts, replies and tool arguments are not stored.
 
-Usage is visible only after Claude Code writes it to a transcript. The app cannot intercept or cancel in-flight calls. Notification banners depend on Windows settings and Focus/Do Not Disturb. History, exports and screenshots can contain private project information; review them before sharing.
+Usage is visible only after a client records it locally. Antigravity uses read-only SQLite connections with WAL support, and `transcript.jsonl` when a session database is absent. `transcript_full.jsonl` is excluded. Missing counters remain unknown; unconfirmed model aliases remain unpriced. Source/call-type filters apply to history, statistics, charts and exports. Usage-free terminal model steps remain visible as incomplete records. The app cannot intercept or cancel in-flight calls. Notification banners depend on Windows settings and Focus/Do Not Disturb. History, exports and screenshots can contain private project information; review them before sharing.
 
 See the [detailed usage guide](docs/usage.md) for pricing assumptions, cache rules, startup behavior and history handling.
 
