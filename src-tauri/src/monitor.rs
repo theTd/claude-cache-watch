@@ -313,6 +313,24 @@ mod tests {
     fn line(id: &str) -> String {
         format!("{{\"type\":\"assistant\",\"requestId\":\"{id}\",\"message\":{{\"usage\":{{\"input_tokens\":100001}}}}}}\n")
     }
+    // Rewrites of equal length are only visible through the modification time, whose
+    // resolution varies by filesystem and clock. Move it forward explicitly so the
+    // tests do not depend on two writes landing in different timer ticks.
+    fn write_after_previous(path: &Path, content: &str) {
+        let previous = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::write(path, content).unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(previous + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+    }
 
     #[test]
     fn unchanged_files_do_not_query_sqlite() {
@@ -355,11 +373,10 @@ mod tests {
         for _ in 0..2 {
             assert!(scanner.scan_file(&mut db, &path, &settings).is_err());
         }
-        std::fs::write(
-            path.with_extension("meta.json"),
+        write_after_previous(
+            &path.with_extension("meta.json"),
             r#"{"description":"Recovered title"}"#,
-        )
-        .unwrap();
+        );
         scanner.scan_file(&mut db, &path, &settings).unwrap();
         assert_eq!(
             store::history(&db, "Recovered title", false, 0)
@@ -367,11 +384,10 @@ mod tests {
                 .total,
             1
         );
-        std::fs::write(
-            path.with_extension("meta.json"),
+        write_after_previous(
+            &path.with_extension("meta.json"),
             r#"{"description":"New agent title"}"#,
-        )
-        .unwrap();
+        );
         scanner.scan_file(&mut db, &path, &settings).unwrap();
         assert_eq!(
             store::history(&db, "New agent title", false, 0)
@@ -419,7 +435,7 @@ mod tests {
         scanner
             .scan_file(&mut db, &path, &Settings::default())
             .unwrap();
-        std::fs::write(&path, format!("{prefix}{}", line("new"))).unwrap();
+        write_after_previous(&path, &format!("{prefix}{}", line("new")));
         scanner
             .scan_file(&mut db, &path, &Settings::default())
             .unwrap();
